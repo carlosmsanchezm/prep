@@ -12,21 +12,61 @@
 ## Coaching: How to Present This
 
 ### Opening Line
-"At IBM Federal, I inherited a platform running Docker Compose, Swarm, Makefiles, Python scripts, and Gomplate templating — nine services serving six hundred users with zero orchestration. I led the migration to Kubernetes with Helm charts, cut release prep forty percent, and hardened it to STIG/FIPS baselines."
+"At IBM Federal, I inherited a dev tool platform running on Docker Compose and Swarm — nine services serving six hundred users, deployed through Makefiles, Python scripts, shell scripts, and a custom templating engine called Gomplate. Five layers of indirection, no rollback, no drift detection. I led the migration to Kubernetes with Helm charts, cut release prep forty percent, and hardened it to STIG/FIPS baselines."
 
 ### Drawing Order
 
-**Step 1 — Draw the BEFORE (left side of whiteboard):**
-Draw a messy chain: Git repo → Gomplate → Makefiles → Python scripts → Shell scripts → kubectl apply → K8s cluster
-Say: "This was the starting point. A developer pushes code, Gomplate templates the configs, Makefiles invoke Python scripts that invoke shell scripts that finally call kubectl. No versioning on the deploy state, no rollback, no drift detection. Every release was a manual checklist."
+**Step 1 — Draw the BEFORE (top half of whiteboard):**
 
-**Step 2 — Draw the AFTER (right side):**
-Draw a clean chain: Git repo → Helm charts → Jenkins CI → Container registry → Dev cluster → Test cluster
-Say: "Here's where I took them. Helm charts for all nine services — declarative, versioned, rollbackable. Jenkins pipeline handles build, lint, package, deploy. Each environment gets its own values.yaml. One command deploys, one command rolls back."
+Draw two big boxes side by side:
 
-**Step 3 — Draw the migration plan (center/bottom):**
-Draw 4 boxes: Planning → Service Migration (9 services, one per week) → Testing → Training
-Say: "Four phases. Two weeks planning standards and templates. Nine weeks migrating one service at a time — controlled blast radius. Testing in parallel. Then two weeks training the team so they own it."
+Left box — **"Config Layer":**
+- Inside: Git Repo, values.yaml, config files, templates
+- All feed into a box labeled "Gomplate (custom templating)"
+- Gomplate outputs to "make command"
+
+Right box — **"Build Layer":**
+- "make command" is the central node (big, draw it prominent)
+- Branching off make: Makefiles, Shell scripts, Python scripts
+- All feed down into "docker-compose / docker stack deploy"
+
+Below both — **"Docker Swarm":**
+- Draw a box with the 9 services inside: Jira, Bitbucket, Confluence, Jenkins, Artifactory, Crowd, Accounts-API, Mailman, HTTPD-UI
+- Write "600+ users" next to it
+
+Draw a dotted line from the services back up to make — label it "manual monitoring (docker logs)"
+
+Write pain points on the side:
+- No rollback — if deploy fails, SSH in and fix manually
+- No drift detection — running state might not match code
+- Gomplate is custom — nobody else uses it
+- Five layers of indirection — config change touches everything
+- Every release = multi-hour manual checklist
+
+Say: "This is what I inherited. A single Git repo, per-service configs and templates that feed through Gomplate — a custom templating engine nobody outside this team uses. Gomplate generates config files that feed into the make command, which is the single entry point for everything. Make triggers per-service Makefiles, Python scripts, and shell scripts, which eventually call docker-compose up or docker stack deploy. Five layers of indirection before a container starts. Nine services, six hundred users, no rollback, no drift detection. If something broke, you'd docker-log your way through, trace back through the scripts, and fix by hand."
+
+**Step 2 — Draw the AFTER (bottom half — show the contrast):**
+
+Draw a clean, simple flow:
+
+```
+[Git Repo] → [Helm Charts] → [Jenkins CI Pipeline] → [Registry] → [Dev Cluster] → [Test Cluster]
+              values.yaml      build → lint → test      versioned     auto-deploy     promote
+              per environment  → package → deploy       images
+```
+
+Say: "Here's where I took them. Helm charts for all nine services — declarative, versioned, rollbackable. Jenkins pipeline handles build, lint, package, deploy, test — all automated. Each environment gets its own values.yaml — no more Gomplate. One command deploys, one command rolls back. Cut release prep forty percent. The platform went from five layers of manual scripting to a single Helm upgrade command."
+
+**Step 3 — Draw the migration plan (side or separate area):**
+
+```
+[1. Planning] → [2. Service Migration] → [3. Testing] → [4. Training]
+ 2 weeks          9 weeks (1/week)         parallel        2 weeks
+ standards        service by service       unit/int/UAT    brown-bags
+ chart template   controlled blast         at every layer  runbooks
+```
+
+Say: "Four phases. Two weeks defining Helm chart standards and a shared template. Nine weeks migrating one service per week — Bitbucket first as the pilot, then Jira, Confluence, and so on. Controlled blast radius — if Bitbucket's migration breaks, only Bitbucket is affected. Testing ran in parallel: unit tests on Helm template output, integration tests per service, full stack system tests. Final two weeks were training — brown-bag sessions, runbooks, and self-healing guides so ops could handle eighty percent of incidents without me."
 
 ### What to Emphasize
 1. **The before state mirrors Anduril** — "Your Podman Compose and manual deploys? That's exactly where IBM was."
