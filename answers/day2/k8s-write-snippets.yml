@@ -1,0 +1,66 @@
+# Day 2 ANSWERS: Write K8s Snippets
+
+---
+# Snippet 1: Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  labels:
+    app: api-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+    spec:
+      containers:
+        - name: api-server
+          image: registry.local/api-server:v2.1.0
+          ports:
+            - containerPort: 8443
+              name: https
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+            periodSeconds: 15
+
+---
+# Snippet 2: Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: api-server
+  ports:
+    - port: 443
+      targetPort: 8443
+      protocol: TCP
+
+---
+# Snippet 3: ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  LOG_LEVEL: "info"
+  config.yaml: |
+    server:
+      port: 8443
+      tls: true

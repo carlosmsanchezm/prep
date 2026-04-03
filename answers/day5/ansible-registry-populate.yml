@@ -1,0 +1,86 @@
+# Day 5 ANSWERS: Registry Population
+
+---
+- name: Populate air-gap registry from diode bundles
+  hosts: registry_server
+  become: true
+  vars:
+    incoming_dir: /opt/diode/incoming
+    manifest_file: "{{ incoming_dir }}/manifest.sha256"
+    harbor_url: harbor.local
+    log_file: /var/log/registry-populate.log
+  tasks:
+    - name: Check manifest exists
+      stat:
+        path: "{{ manifest_file }}"
+      register: manifest_check
+
+    - name: Fail if manifest missing
+      fail:
+        msg: "Manifest file not found: {{ manifest_file }}"
+      when: not manifest_check.stat.exists
+
+    - name: Validate checksums
+      command: sha256sum -c "{{ manifest_file }}"
+      args:
+        chdir: "{{ incoming_dir }}"
+      register: checksum_result
+      failed_when: checksum_result.rc != 0
+
+    - name: Create temp working directory
+      tempfile:
+        state: directory
+        prefix: registry-import-
+      register: temp_dir
+
+    - name: Find all bundle archives
+      find:
+        paths: "{{ incoming_dir }}"
+        patterns: "*.tar.gz"
+      register: bundles
+
+    - name: Unpack each bundle
+      unarchive:
+        src: "{{ item.path }}"
+        dest: "{{ temp_dir.path }}"
+        remote_src: yes
+      loop: "{{ bundles.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Find all image tarballs
+      find:
+        paths: "{{ temp_dir.path }}"
+        patterns: "*.tar"
+        recurse: yes
+      register: image_tars
+
+    - name: Load images into Docker
+      command: "docker load -i {{ item.path }}"
+      loop: "{{ image_tars.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: load_results
+
+    - name: Tag and push images to Harbor
+      shell: |
+        IMAGE_NAME=$(docker load -i {{ item.path }} 2>&1 | grep "Loaded image" | awk '{print $NF}')
+        if [ -n "$IMAGE_NAME" ]; then
+          docker tag "$IMAGE_NAME" "{{ harbor_url }}/$IMAGE_NAME"
+          docker push "{{ harbor_url }}/$IMAGE_NAME"
+          echo "Pushed: {{ harbor_url }}/$IMAGE_NAME" >> {{ log_file }}
+        fi
+      loop: "{{ image_tars.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Clean up temp directory
+      file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+
+    - name: Log completion
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "[{{ ansible_date_time.iso8601 }}] Registry population complete. {{ bundles.files | length }} bundles, {{ image_tars.files | length }} images processed."
+        create: yes

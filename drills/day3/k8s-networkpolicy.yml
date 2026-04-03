@@ -1,0 +1,21 @@
+# Day 3: Write a NetworkPolicy
+# Write the YAML from memory based on these requirements.
+
+---
+
+# Requirement 1: Write a NetworkPolicy called "api-isolation" in namespace "production"
+# - Applies to pods with label: app=api-server
+# - Allow ingress ONLY from pods with label: app=frontend (same namespace)
+# - Allow ingress ONLY on port 8443/TCP
+# - Allow egress to pods with label: app=database on port 5432/TCP
+# - Allow egress DNS (port 53 UDP+TCP to any namespace)
+# - Block ALL other ingress and egress
+#
+# YOUR ANSWER:
+
+
+# Requirement 2: Write a "deny-all" NetworkPolicy that blocks ALL
+# ingress and egress for every pod in the namespace "restricted"
+#
+# YOUR ANSWER:
+

@@ -1,0 +1,29 @@
+# Day 4: Write an RKE2 Node Bootstrap Playbook
+# This is the most Anduril-relevant exercise.
+# Write a playbook that prepares a node for RKE2 installation in an air-gapped environment.
+# Try to write as much as you can from memory. Check answers after.
+
+---
+# Requirements:
+# 1. Disable swap
+# 2. Load required kernel modules (br_netfilter, overlay)
+# 3. Set kernel parameters (bridge-nf-call-iptables, ip_forward)
+# 4. Open firewall ports (6443, 9345, 10250, 2379-2380, 8472/UDP)
+# 5. Install RKE2 from a local binary path (air-gapped — no internet)
+# 6. Configure RKE2 (write a config.yaml with server URL and token)
+# 7. Start the RKE2 service
+
+# YOUR ANSWER — write the full playbook below:
+
+---
+- name: Bootstrap RKE2 node
+  hosts: rke2_nodes
+  become: true
+  vars:
+    rke2_binary_path: /opt/rke2/rke2.linux-amd64
+    rke2_server_url: "https://10.0.1.10:9345"
+    rke2_token: "{{ vault_rke2_token }}"
+    rke2_type: agent   # or "server" for control plane
+  tasks:
+    # Write your tasks here:
+

@@ -1,0 +1,91 @@
+# Day 1 ANSWERS: Ansible Read and Fix
+
+# Bug 1: state should be "present" not "installed"
+#   apt module uses: present, absent, latest (not "installed")
+
+# Bug 2: state should be "started" not "running"
+#   service module uses: started, stopped, restarted, reloaded
+
+# Bug 3: mode should be a string '0644' not integer 644
+#   Without quotes, 644 is interpreted as octal 644 (decimal 420)
+#   Always quote file modes: '0644'
+
+# Bug 4: Handler name case mismatch
+#   notify says "Restart Nginx" but handler is named "restart nginx"
+#   Handler names are CASE SENSITIVE
+
+# Bug 5: Conditional uses = instead of ==
+#   when: ansible_os_family == "Debian"  (double equals for comparison)
+
+# Bug 6: append should be true (or yes)
+#   append: false REPLACES all existing groups with just www-data
+#   append: true ADDS www-data to existing groups
+
+# Bug 7: port needs to include /tcp
+#   firewalld port format is "80/tcp" not just "80"
+
+# Bug 8: with_items is deprecated (still works but old)
+#   Use loop: instead for modern Ansible
+#   Not a hard bug but a best practice issue
+
+---
+- name: Configure web server
+  hosts: webservers
+  become: yes
+  tasks:
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present                    # FIXED: present, not installed
+
+    - name: Start nginx
+      service:
+        name: nginx
+        state: started                    # FIXED: started, not running
+        enabled: true
+
+    - name: Copy nginx config
+      copy:
+        src: nginx.conf
+        dest: /etc/nginx/nginx.conf
+        mode: '0644'                      # FIXED: quoted string
+
+    - name: Update site config
+      template:
+        src: site.conf.j2
+        dest: /etc/nginx/sites-available/default
+      notify: restart nginx               # FIXED: matches handler name exactly
+
+    - name: Install certbot on Ubuntu only
+      apt:
+        name: certbot
+      when: ansible_os_family == "Debian" # FIXED: == not =
+
+    - name: Create deploy user
+      user:
+        name: deploy
+        groups: www-data
+        shell: /bin/bash
+        append: true                      # FIXED: true, not false
+
+    - name: Open HTTP port
+      firewalld:
+        port: 80/tcp                      # FIXED: include /tcp
+        permanent: yes
+        state: enabled
+
+    - name: Create log directories
+      file:
+        path: "{{ item }}"
+        state: directory                  # FIXED: "directory" not "dir"
+        owner: www-data
+      loop:                               # FIXED: loop instead of with_items
+        - /var/log/myapp
+        - /var/log/myapp/access
+        - /var/log/myapp/error
+
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted

@@ -1,0 +1,29 @@
+# Day 5: Write Ansible Tasks — Registry Population
+# Write a playbook that unpacks transferred bundles into a local Harbor registry.
+# This is the EXACT problem Anduril is trying to solve.
+
+---
+
+# Scenario: Bundles have been transferred via diode to /opt/diode/incoming
+# Each bundle is a .tar.gz containing container image tarballs
+# You need to:
+# 1. Validate checksums against /opt/diode/incoming/manifest.sha256
+# 2. Unpack valid bundles to a temp directory
+# 3. Load each image tarball into the local Docker daemon
+# 4. Tag and push each image to Harbor at harbor.local
+# 5. Log everything
+# 6. Clean up temp files
+
+# YOUR ANSWER:
+---
+- name: Populate air-gap registry from diode bundles
+  hosts: registry_server
+  become: true
+  vars:
+    incoming_dir: /opt/diode/incoming
+    manifest_file: "{{ incoming_dir }}/manifest.sha256"
+    harbor_url: harbor.local
+    log_file: /var/log/registry-populate.log
+  tasks:
+    # Write your tasks here:
+

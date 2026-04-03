@@ -1,0 +1,64 @@
+# Day 2 ANSWERS: Write Ansible Tasks
+
+---
+# Task 1: Install Docker CE and start service
+- name: Install Docker CE
+  yum:
+    name: docker-ce
+    state: present
+
+- name: Start and enable Docker
+  service:
+    name: docker
+    state: started
+    enabled: yes
+
+# Task 2: Create deployer user with sudo
+- name: Create deployer user
+  user:
+    name: deployer
+    groups: wheel
+    append: yes
+    shell: /bin/bash
+    create_home: yes
+
+# Task 3: Template sshd_config with handler
+- name: Configure sshd
+  template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: '0600'
+  notify: restart sshd
+
+# (handler would be):
+# handlers:
+#   - name: restart sshd
+#     service:
+#       name: sshd
+#       state: restarted
+
+# Task 4: Add sysctl line and apply
+- name: Enable IP forwarding
+  lineinfile:
+    path: /etc/sysctl.conf
+    line: 'net.ipv4.ip_forward = 1'
+    state: present
+  register: sysctl_result
+
+- name: Apply sysctl changes
+  command: sysctl -p
+  when: sysctl_result.changed
+
+# Task 5: Open firewall ports
+- name: Open RKE2 ports
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    immediate: yes
+    state: enabled
+  loop:
+    - 6443
+    - 9345
+    - 10250

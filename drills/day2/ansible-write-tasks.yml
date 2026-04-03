@@ -1,0 +1,27 @@
+# Day 2: Write Ansible Tasks
+# For each description, write the Ansible task(s) from memory.
+# No docs — try first, then check answers.
+
+---
+
+# Task 1: Install Docker CE and start the Docker service. Enable it on boot.
+# YOUR ANSWER:
+
+
+# Task 2: Create a user called "deployer" with sudo access (wheel group), bash shell, and a home directory.
+# YOUR ANSWER:
+
+
+# Task 3: Copy a template file "sshd_config.j2" to /etc/ssh/sshd_config, owned by root, mode 0600.
+#          Restart sshd if the file changes.
+# YOUR ANSWER:
+
+
+# Task 4: Add the line "net.ipv4.ip_forward = 1" to /etc/sysctl.conf.
+#          Then run "sysctl -p" only if the file changed.
+# YOUR ANSWER:
+
+
+# Task 5: Open ports 6443, 9345, and 10250 (TCP) in firewalld. Make it permanent.
+# YOUR ANSWER:
+

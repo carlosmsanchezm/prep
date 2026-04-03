@@ -1,0 +1,61 @@
+# Day 3 ANSWERS: NetworkPolicy
+
+---
+# Requirement 1: api-isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-isolation
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: api-server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - port: 8443
+          protocol: TCP
+  egress:
+    # Allow to database
+    - to:
+        - podSelector:
+            matchLabels:
+              app: database
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow DNS (CRITICAL — without this, pods can't resolve service names)
+    - to:
+        - namespaceSelector: {}      # any namespace (CoreDNS is in kube-system)
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# Requirement 2: deny-all
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: restricted
+spec:
+  podSelector: {}                    # empty = selects ALL pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress or egress rules = deny everything
+
+# KEY POINTS:
+# - podSelector: {} means "all pods in this namespace"
+# - Listing policyTypes without rules = deny all for those types
+# - Once ANY NetworkPolicy selects a pod, default-allow is gone
+# - Always remember DNS egress (port 53) or nothing resolves

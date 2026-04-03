@@ -1,0 +1,81 @@
+# Day 5 ANSWERS: K8s Mixed Review
+
+---
+# Part 1: DaemonSet
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.7.0
+          ports:
+            - containerPort: 9100
+              name: metrics
+
+# KEY POINTS about DaemonSets:
+# - No replicas field — DaemonSet runs ONE pod per node automatically
+# - Use tolerations to run on tainted nodes (control-plane, GPU nodes, etc.)
+# - Common use: monitoring agents, log collectors, network plugins
+
+---
+# Part 2: Bugs
+
+# Bug 1: Selector labels don't match template labels
+#   selector.matchLabels: app: postgres
+#   template.labels: app: database
+#   Fix: template labels should be app: postgres
+
+# Bug 2: "port:" should be "ports:" (plural, it's a list)
+#   port:
+#     - containerPort: 5432
+#   Fix:
+#   ports:
+#     - containerPort: 5432
+
+# Bug 3: Password in plain text as env var
+#   value: supersecret123 → should use secretKeyRef
+#   Fix:
+#   valueFrom:
+#     secretKeyRef:
+#       name: postgres-secret
+#       key: password
+
+# Bug 4: Storage "10G" should be "10Gi"
+#   Kubernetes uses binary units: Gi (gibibytes), not G
+#   Fix: storage: 10Gi
+
+# Bug 5: Service selector doesn't match pod labels
+#   Service selector: app: postgres
+#   But pod labels are (incorrectly) app: database
+#   After fixing Bug 1 (labels → postgres), this will match
+#   The point: service and pods MUST share the selector label
+
+---
+# Part 3: Deployment vs StatefulSet
+
+# A Deployment manages stateless pods — they're interchangeable, can be scaled
+# up/down freely, and don't maintain identity. Pods get random names like
+# "api-7f8d9-xk2p" and can be rescheduled to any node.
+#
+# A StatefulSet manages stateful pods — each pod gets a stable hostname
+# (postgres-0, postgres-1, postgres-2), stable persistent storage that follows
+# the pod even if rescheduled, and ordered startup/shutdown. Use StatefulSet
+# for databases, message queues, or anything that needs persistent identity
+# and storage. Use Deployment for everything else.

@@ -1,0 +1,109 @@
+# Day 1 ANSWERS: Debug Kubernetes Manifests
+
+# Bug 1: apiVersion should be apps/v1 (not apps/v1beta1 — deprecated since K8s 1.16)
+
+# Bug 2: Selector doesn't match template labels
+#   selector.matchLabels.app: "web-frontend"
+#   template.labels.app: "web-app"
+#   These MUST match or the Deployment won't manage the pods
+
+# Bug 3: containerPort should be an integer, not a string
+#   containerPort: "8080" → containerPort: 8080
+
+# Bug 4: CPU limit (50m) is LESS than CPU request (100m)
+#   Limits must be >= requests. Should be limits.cpu: 500m (or at least 100m)
+
+# Bug 5: livenessProbe references port name "web-port" but no port is named
+#   Either name the containerPort: { containerPort: 8080, name: web-port }
+#   Or use port number: port: 8080
+
+# Bug 6: Service selector doesn't match pod labels
+#   Service selector: app: frontend
+#   Pod labels: app: web-app
+#   Service won't route traffic to these pods (endpoints will be empty)
+
+# Bug 7: protocol and type values should be uppercase
+#   protocol: tcp → protocol: TCP
+#   type: clusterIP → type: ClusterIP
+#   (Kubernetes is case-sensitive for these fields)
+
+# Bug 8: NetworkPolicy ingress port is 80 but the container listens on 8080
+#   The NetworkPolicy should allow port 8080 (the actual container port)
+#   OR the pods should be accessed via the Service on port 80 (but NetworkPolicy
+#   operates at the pod level, so it needs the container port)
+
+---
+# CORRECTED Resource 1: Deployment
+apiVersion: apps/v1                          # FIXED: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  labels:
+    app: web-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-app                           # FIXED: matches template labels
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+        - name: web
+          image: registry.local/web-app:latest
+          ports:
+            - containerPort: 8080            # FIXED: integer, not string
+              name: http                     # FIXED: named for probe reference
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m                      # FIXED: limit >= request
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http                     # FIXED: matches named port
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+
+---
+# CORRECTED Resource 2: Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-svc
+spec:
+  selector:
+    app: web-app                             # FIXED: matches pod labels
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP                          # FIXED: uppercase
+  type: ClusterIP                            # FIXED: uppercase I
+
+---
+# CORRECTED Resource 3: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-traffic
+spec:
+  podSelector:
+    matchLabels:
+      app: web-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: frontend
+      ports:
+        - port: 8080                         # FIXED: container port, not service port
+          protocol: TCP

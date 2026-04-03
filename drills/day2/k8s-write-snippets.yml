@@ -1,0 +1,33 @@
+# Day 2: Write K8s Snippets
+# For each description, write the YAML from memory.
+# Focus on getting the structure right — don't worry about memorizing every field.
+
+---
+
+# Snippet 1: Write a Deployment for an app called "api-server"
+# - 2 replicas
+# - Image: registry.local/api-server:v2.1.0
+# - Container port: 8443
+# - CPU request: 200m, limit: 1000m
+# - Memory request: 256Mi, limit: 512Mi
+# - Liveness probe: GET /healthz on port 8443, check every 15s
+#
+# YOUR ANSWER:
+
+
+# Snippet 2: Write a ClusterIP Service called "api-server-svc"
+# - Routes to pods with label app: api-server
+# - Service port 443 → target port 8443
+#
+# YOUR ANSWER:
+
+
+# Snippet 3: Write a ConfigMap called "app-config" with two keys:
+# - LOG_LEVEL: "info"
+# - A file key "config.yaml" containing:
+#     server:
+#       port: 8443
+#       tls: true
+#
+# YOUR ANSWER:
+

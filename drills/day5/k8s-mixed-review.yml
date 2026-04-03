@@ -1,0 +1,85 @@
+# Day 5: K8s Mixed Review
+# Mix of write, debug, and explain exercises.
+
+---
+
+# ============================================================
+# Part 1: WRITE — DaemonSet
+# ============================================================
+
+# Write a DaemonSet called "node-exporter" that:
+# - Runs on every node in the cluster
+# - Uses image: prom/node-exporter:v1.7.0
+# - Exposes port 9100
+# - Has a toleration to run on control-plane nodes too
+#
+# YOUR ANSWER:
+
+
+# ============================================================
+# Part 2: DEBUG — Find 5 bugs in this StatefulSet + Service
+# ============================================================
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          port:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              value: supersecret123
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10G
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+spec:
+  clusterIP: none
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+
+# Bugs:
+# 1.
+# 2.
+# 3.
+# 4.
+# 5.
+
+
+# ============================================================
+# Part 3: EXPLAIN
+# ============================================================
+
+# Question: What is the difference between a Deployment and a StatefulSet?
+# When would you use each? Answer in 3-4 sentences.
+#
+# YOUR ANSWER:
+

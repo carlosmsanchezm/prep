@@ -1,0 +1,116 @@
+# Day 4 ANSWERS: RKE2 Node Bootstrap Playbook
+
+---
+- name: Bootstrap RKE2 node
+  hosts: rke2_nodes
+  become: true
+  vars:
+    rke2_binary_path: /opt/rke2/rke2.linux-amd64
+    rke2_server_url: "https://10.0.1.10:9345"
+    rke2_token: "{{ vault_rke2_token }}"
+    rke2_type: agent
+  tasks:
+    # 1. Disable swap
+    - name: Disable swap
+      command: swapoff -a
+      changed_when: false
+
+    - name: Remove swap from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '.*swap.*'
+        state: absent
+
+    # 2. Load kernel modules
+    - name: Load required kernel modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - name: Ensure kernel modules load on boot
+      copy:
+        content: |
+          br_netfilter
+          overlay
+        dest: /etc/modules-load.d/rke2.conf
+        mode: '0644'
+
+    # 3. Set kernel parameters
+    - name: Set kernel parameters for K8s networking
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-rke2.conf
+        reload: yes
+      loop:
+        - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { key: 'net.ipv4.ip_forward', value: '1' }
+
+    # 4. Open firewall ports
+    - name: Open RKE2 TCP ports
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop:
+        - 6443      # K8s API server
+        - 9345      # RKE2 supervisor (node join)
+        - 10250     # kubelet metrics
+        - 2379      # etcd client
+        - 2380      # etcd peer
+
+    - name: Open VXLAN UDP port
+      firewalld:
+        port: 8472/udp
+        permanent: yes
+        immediate: yes
+        state: enabled
+
+    # 5. Install RKE2 binary (air-gapped)
+    - name: Copy RKE2 binary to install location
+      copy:
+        src: "{{ rke2_binary_path }}"
+        dest: /usr/local/bin/rke2
+        mode: '0755'
+        remote_src: yes
+
+    - name: Run RKE2 install script (air-gap mode)
+      command: /usr/local/bin/rke2 --help
+      register: rke2_check
+      changed_when: false
+      failed_when: rke2_check.rc != 0
+
+    # 6. Configure RKE2
+    - name: Create RKE2 config directory
+      file:
+        path: /etc/rancher/rke2
+        state: directory
+        mode: '0755'
+
+    - name: Write RKE2 config
+      copy:
+        content: |
+          server: {{ rke2_server_url }}
+          token: {{ rke2_token }}
+        dest: /etc/rancher/rke2/config.yaml
+        mode: '0600'
+      notify: restart rke2
+
+    # 7. Enable and start RKE2
+    - name: Enable and start RKE2 service
+      systemd:
+        name: "rke2-{{ rke2_type }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+  handlers:
+    - name: restart rke2
+      systemd:
+        name: "rke2-{{ rke2_type }}"
+        state: restarted

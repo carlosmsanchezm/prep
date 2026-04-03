@@ -1,0 +1,58 @@
+# Day 2: Read and Fix a GitLab CI Pipeline
+# This pipeline has 6 bugs. Find and fix them all.
+
+stages:
+  - build
+  - scan
+  - deploy
+
+variables:
+  REGISTRY: registry.local:5000
+  IMAGE: $REGISTRY/my-app
+
+build-image:
+  stage: build
+  script:
+    # Bug 1: What's wrong with this tag?
+    - docker build -t $IMAGE:latest .
+    - docker push $IMAGE:latest
+
+scan-image:
+  stage: scan
+  script:
+    # Bug 2: What's wrong with this Trivy command?
+    - trivy image $IMAGE:latest
+  # Bug 3: What's wrong with this failure handling?
+  allow_failure: true
+
+deploy-staging:
+  stage: deploy
+  script:
+    - kubectl set image deployment/my-app my-app=$IMAGE:latest
+    - kubectl rollout status deployment/my-app
+  # Bug 4: What's wrong with this environment config?
+  enviroment:
+    name: staging
+  # Bug 5: What's wrong with these rules?
+  rules:
+    - if: $CI_COMMIT_BRANCH == main
+
+deploy-production:
+  stage: deploy
+  script:
+    - kubectl set image deployment/my-app my-app=$IMAGE:latest
+    - kubectl rollout status deployment/my-app
+  environment:
+    name: production
+  # Bug 6: What's missing for production deployment?
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# Write the bug numbers and fixes below:
+#
+# Bug 1:
+# Bug 2:
+# Bug 3:
+# Bug 4:
+# Bug 5:
+# Bug 6:

@@ -1,0 +1,24 @@
+# Day 4: Write RBAC Resources
+# Write all three resources from memory.
+
+---
+
+# Requirement: Create RBAC for a CI/CD service account
+# - ServiceAccount called "deploy-sa" in namespace "cicd"
+# - Role called "deployer" that can:
+#   - get, list, watch, create, update, patch deployments (in apps group)
+#   - get, list, watch, create, update services (in core group)
+#   - get, list pods and pods/log (in core group)
+# - RoleBinding that binds the Role to the ServiceAccount
+
+# Write the ServiceAccount:
+# YOUR ANSWER:
+
+
+# Write the Role:
+# YOUR ANSWER:
+
+
+# Write the RoleBinding:
+# YOUR ANSWER:
+
