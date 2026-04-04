@@ -157,15 +157,33 @@ Gomplate is a command-line template engine — like Jinja2 or Helm's Go template
 **Q: Is the "Development & Configuration Layer" a developer's laptop or a server?**
 Both. The Git repo lives on a remote server (Bitbucket — they used their own Bitbucket instance for source control). But the config layer (running Gomplate, running make) happens on a developer's local machine OR on a shared build server. There was no proper CI/CD for the Compose/Swarm setup — it was manually triggered.
 
-**Q: Where is staging? Production?**
-The before-state had minimal environment separation:
-- **Local dev:** Developer runs `make` on their laptop → Gomplate generates configs → `docker-compose up` runs services locally for testing
-- **Shared dev/test instance:** There was a shared environment where services ran for integration testing and validation — but it wasn't a formal staging environment with its own promotion process. It was more like "deploy here, check if it works, then push the same thing to the main deployment."
-- **"Production" (the deployed environment):** The live instance that six hundred engineers used daily. Someone runs `make deploy` from a build server → scripts call `docker stack deploy` → Swarm runs the services on shared infrastructure.
-- **The gap:** No formal promotion path — no "deploy to staging, validate, promote to prod" pipeline. The shared instance served double duty as both test and production in practice. That's one of the major things the Helm migration fixed — proper dev and test K8s clusters with a CI/CD pipeline handling promotion between them.
+**Q: What were the environments?**
+Three environments, simple separation:
+- **Dev (local machines):** Each developer clones the repo, runs `docker-compose up` on their laptop to bring up the services locally. Tests changes against the local stack. Pushes code to Bitbucket when ready.
+- **Test (shared environment):** A shared server running the full 9-service stack via Docker Swarm. Used for integration testing and validation before production.
+- **Production:** The live environment that six hundred engineers used daily. Same infrastructure as test but separate — production values, production data.
+
+**Q: How did the 2-week release cycle work?**
+Releases happened every two weeks on a sprint cadence:
+1. **Weeks 1-2:** Development. Changes accumulate in Git. Developers test locally with `docker-compose up`.
+2. **End of sprint:** Code freeze. I pull the latest code on the test server, run `make deploy` with test environment values. Gomplate generates the test configs, scripts execute `docker stack deploy`. All nine services come up on the test instance.
+3. **Validation (1-2 days):** Team validates — hit each service's web UI, verify integrations work (Jira connects to its database, Bitbucket syncs with Crowd SSO, Jenkins builds trigger correctly). Manual smoke testing.
+4. **Production deploy:** After test passes, same process on the production infrastructure. Pull code, run `make deploy` with production values.yaml. Same Gomplate → Makefiles → scripts → `docker stack deploy` chain, just pointing at production.
+5. **Verification:** Check all nine services are up — `docker ps`, hit each web UI, verify six hundred users can access everything.
+6. **Rollback plan:** If something breaks — revert the Git commit, re-run `make deploy` with the previous code. Not automated, not fast, but it worked. The gap: no revision history on the deployment itself. You had to know WHICH commit to revert to.
+
+**Q: How did `make deploy` know which environment to target?**
+The values files. `config/local/values.yaml` for local dev, `config/test/values.yaml` for the test environment, `config/prod/values.yaml` for production. Gomplate reads the right values file based on an environment variable or a make target: `make deploy-test` vs `make deploy-prod`. Same templates, different values — that's the one thing Gomplate did well.
+
+**Q: What was the pain with this release process?**
+1. **Manual promotion** — a person had to SSH to the test server, pull code, run make. Then do it again on production. No pipeline, no automation.
+2. **No atomic rollback** — reverting meant finding the right Git commit, re-running make, and hoping the same Gomplate configs generated the same output. No `helm rollback` equivalent.
+3. **Config drift** — between the time you deployed to test and deployed to production, someone might have changed a config file. No way to detect it.
+4. **Downtime risk** — `docker stack deploy` replaces containers one by one, but Swarm's rolling update strategy was basic. No health checks gating the rollout. If the new container crashed, users saw errors until someone noticed and rolled back manually.
+5. **Release prep took hours** — manually checking each service, verifying configs, running make targets in order. This is the "forty percent reduction" metric: Helm made this a single command.
 
 **Q: This was for DoD / TRMC — was this production?**
-Yes. These nine services (Jira, Bitbucket, Jenkins, etc.) were the development infrastructure for the entire TENA program — six hundred engineers used them daily to write, build, and test code. It wasn't a customer-facing app, but it was production in the sense that if Jira went down, six hundred people couldn't file issues. If Jenkins went down, builds stopped. If Bitbucket went down, nobody could push code. Mission-critical internal tooling.
+Yes. These nine services (Jira, Bitbucket, Jenkins, etc.) were the development infrastructure for the entire TENA program — six hundred engineers used them daily to write, build, and test code. It wasn't a customer-facing app, but it was production in the sense that if Jira went down, six hundred people couldn't file issues. If Jenkins went down, builds stopped. If Bitbucket went down, nobody could push code. Mission-critical internal tooling for the DoD Test Resource Management Center.
 
 ### The Build Layer — How Does It Actually Work?
 
@@ -204,15 +222,15 @@ Interesting question — if Andy asks this: "Nix solves a different problem. Mak
 ### Production and CI/CD — The Gaps
 
 **Q: Where is CI/CD in the before state?**
-**It didn't exist for platform deployment.** There was a Jenkins instance (one of the 9 services), but it was used by the engineering teams for THEIR application builds, not for deploying the dev tool platform itself. We maintained and managed Jenkins for the users, but the platform's own deployment was manual: SSH in, git pull, make deploy. No pipeline for our own infrastructure, no gates, no automated testing of the platform itself.
+**It didn't exist for platform deployment.** There was a Jenkins instance (one of the 9 services), but it was used by the engineering teams for THEIR application builds, not for deploying the dev tool platform itself. We maintained and managed Jenkins for the users, but the platform's own deployment was manual: SSH to the server, git pull, run `make deploy-test` or `make deploy-prod`. No pipeline for our own infrastructure, no gates, no automated testing of the platform itself. The 2-week release cycle was entirely human-driven.
 
-After the Helm migration, I set up a CI/CD pipeline that automated: build images → lint charts → package → deploy to dev cluster → test → promote. The specific CI tool isn't what mattered — what mattered was having an automated promotion path that didn't exist before.
+After the Helm migration, I set up a CI/CD pipeline that automated: build images → lint charts → package → deploy to dev cluster → test → promote to test cluster. The promotion from test to production became a single `helm upgrade` command with the production values file — not a multi-hour manual process.
 
 **Q: If Andy asks "what CI tool did you use?"**
-"We had access to the CI tooling on the platform — the migration focused on building the pipeline automation itself: build, lint, package, deploy, test, promote. The tool was less important than establishing the process — before, there was no automated deployment at all for the platform infrastructure."
+"We used the CI tooling available on the platform — the migration focused on building the pipeline automation itself: build, lint, package, deploy, test, promote. The tool was less important than establishing the automated promotion path — before, deployment was entirely manual."
 
-**Q: So what would you say production was?**
-"The before-state had minimal environment separation. There was local dev on laptops, a shared instance for integration testing, and the main deployment that six hundred users depended on. But there was no formal promotion path — no pipeline that gated changes from dev to test to production. The shared instance served double duty. One of the first things I did in the migration was establish proper dev and test K8s clusters with a real CI/CD pipeline — so we had a clean promotion path. That's what brought reliability up to ninety-nine point nine percent."
+**Q: How would you summarize the before vs after release process?**
+"Before: two-week sprints, end of sprint someone SSH'd to the test server, pulled code, ran make deploy, manually validated all nine services, then repeated the same process on production. Release prep took hours, rollback was a gamble. After: developer pushes code, pipeline automatically builds images, lints charts, packages, deploys to dev cluster, runs tests. Promotion to test is one command. Promotion to production is one command. Rollback is `helm rollback` to any previous revision. The same release that used to take hours now takes minutes."
 
 ---
 
