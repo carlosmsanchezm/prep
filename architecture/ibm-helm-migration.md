@@ -180,16 +180,17 @@ Say: "The workflow is clean now. Developer clones, modifies Helm chart values, r
 
 ```
 [1. Planning] → [2. Service Migration] → [3. Testing] → [4. Training]
- 2 weeks          9 weeks (1/week)         parallel        2 weeks
- standards        service by service       unit/int/UAT    brown-bags
- chart template   controlled blast         at every layer  runbooks
+ 2 weeks          18 weeks (2/service)     parallel        2 weeks
+ standards        service by service       per service     brown-bags
+ chart template   controlled blast         + full stack    runbooks
+ shared library   radius                   at milestones
 ```
 
-Say: "Four phases. Two weeks defining Helm chart standards and a shared template. Nine weeks migrating one service per week — Bitbucket first as the pilot, then Jira, Confluence, and so on. Controlled blast radius — if Bitbucket's migration breaks, only Bitbucket is affected. Testing ran in parallel: unit tests on Helm template output, integration tests per service, full stack system tests. Final two weeks were training — brown-bag sessions, runbooks, and self-healing guides so ops could handle eighty percent of incidents without me."
+Say: "Four phases. Two weeks upfront defining Helm chart standards — chart structure, naming conventions, the shared library chart. Then eighteen weeks migrating one service every two weeks — Mailman first as the simplest pilot to prove the process, then Accounts-API, then the bigger ones like Jira and Bitbucket. Each service got two weeks: first week writing the chart and converting configs, second week testing — unit tests on Helm template output, integration tests for that service, then a stack test to make sure it works with everything else. Full system tests at major milestones. Final two weeks were training — brown-bag sessions, runbooks, self-healing guides so ops could handle eighty percent of incidents without me."
 
 ### What to Emphasize
 1. **The before state mirrors Anduril** — "Your Podman Compose and manual deploys? That's exactly where IBM was."
-2. **Service-by-service, not big-bang** — "I never migrated everything at once. One service per week, tested, validated, then next."
+2. **Service-by-service, not big-bang** — "I never migrated everything at once. Two weeks per service, tested at every layer, validated before moving on."
 3. **40% release prep reduction** — concrete metric
 4. **600+ users never went down** — migration happened under live production
 5. **Team training** — "I didn't just migrate and leave. Brown-bag sessions, runbooks, self-healing docs — eighty percent of incidents could be resolved without me."
@@ -205,11 +206,20 @@ Say: "Four phases. Two weeks defining Helm chart standards and a shared template
 - helm template (dry-run render), helm lint (validation), helm diff (show changes)
 - helm rollback: how it works (reverts to previous release revision)
 
-**Jenkins Pipeline — study these concepts:**
-- Declarative pipeline: stages, steps, post actions
-- Azure DevOps agents (IBM used these as build agents)
-- Artifact storage: pushing Helm packages to a chart repo
-- Test harnesses: unit (helm template output validation), integration (deploy to dev), system (full stack test)
+**CI/CD Pipeline — study these concepts:**
+- Jenkins declarative pipeline (Jenkinsfile in YAML): stages, steps, post actions
+- Build agents for running pipeline jobs
+- Artifact storage: pushing Helm packages to a chart repo (Artifactory in our case — we used our own Artifactory instance as the Helm chart repository)
+- Test harnesses at each stage:
+  - **Unit:** `helm template` output validation — does the rendered YAML match expected output?
+  - **Integration:** `helm install` to dev cluster — does the service start, pass health checks, connect to its database?
+  - **System:** full 9-service stack test — do all services work together? Can a user log into Jira via Crowd SSO?
+  - **UAT:** manual validation by the ops team before production promotion
+
+**Why Jenkins (if asked):** "We had Jenkins as one of the nine services — it was already running on the platform for the engineering teams' builds. I leveraged the same Jenkins for the platform's own CI/CD pipeline. It made sense because we were already managing it, and the team knew how to write Jenkinsfiles."
+
+**Why 2 weeks per service?**
+"Each service has its own complexity — Jira has custom plugins and a complex database schema, Bitbucket has hundred-gig git repositories that need persistent storage, Artifactory has dependency chains where other services pull from it. Two weeks gives you one week to write the chart, convert configs, and handle service-specific quirks, and a second week to test at every layer. Trying to rush it into one week would mean cutting testing — and with six hundred users on the line, that's not acceptable."
 
 **The 9 Services — know them:**
 | Service | What It Does | Migration Notes |
@@ -229,14 +239,184 @@ Say: "Four phases. Two weeks defining Helm chart standards and a shared template
 **"Why Helm over Kustomize?"**
 "Helm gives us packaging — a chart is a self-contained artifact you can version, share, and deploy. Kustomize patches existing YAML but doesn't package it. For nine services with shared patterns, Helm's templating and library charts saved us from maintaining nine separate Kustomize bases."
 
-**"Why one service per week?"**
-"Controlled blast radius. If the Bitbucket migration breaks, only Bitbucket is affected — not all nine services. It also let the team learn Helm incrementally instead of drinking from the firehose."
+**"Why two weeks per service?"**
+"Each service has real complexity — Jira has custom plugins and database schemas, Bitbucket has hundred-gig git repos needing persistent storage, Artifactory has dependency chains. Two weeks gives one week to write the chart and convert configs, one week to test at every layer. Rushing into one week means cutting testing with six hundred users on the line."
 
 **"Why not just Docker Compose to Docker Compose with better scripts?"**
 "Compose doesn't give you orchestration — no auto-restart, no rolling updates, no resource limits, no health checks. K8s with Helm gives us all of that plus declarative state. The gap between 'working Compose' and 'reliable production' was what kept causing outages."
 
+**"Why define Helm standards FIRST (the 2-week planning phase)?"**
+"Because without standards, every chart looks different. The first thing I did was define: chart directory structure, naming conventions, how values.yaml is organized, which labels every resource gets, and the shared library chart with common patterns. This way, when the team starts working on their charts, everyone follows the same template. I saw what happens without this at the start — the first few services had duplicated patterns, inconsistent naming, different approaches to health checks. We refactored into the library, but it cost rework. Standards first, then execution."
+
 **"What would you change?"**
-"I'd have started with a shared library chart from day one. We ended up with duplicated template patterns across the first four services, then refactored into a library. Starting with the library would have saved two weeks of rework."
+"Honestly, I'd have started with the shared library chart during the planning phase instead of building it after the first few services revealed the pattern. We duplicated templates across Mailman, Accounts-API, and Crowd before I said 'wait, these all look the same — let me extract the common parts.' Starting with the library from day one would have saved a couple weeks of refactoring."
+
+---
+
+## K8s Fundamentals — Know These Mechanics Cold
+
+> Andy will probe deeper than "we used Deployments." You need to explain HOW each K8s resource works, WHY you chose it, and what alternatives exist. Study this section until you can explain each concept without notes.
+
+### Deployments + Probes
+
+**What is a Deployment?**
+A Deployment is a K8s resource that manages a set of identical pods. You declare: which container image, how many replicas, resource limits, and health checks. K8s ensures that many pods are always running. If one crashes, K8s replaces it. If you update the image, K8s does a rolling update — replacing pods one at a time so there's zero downtime.
+
+**Liveness Probe vs Readiness Probe — what's the difference?**
+
+| | Liveness Probe | Readiness Probe |
+|-|---------------|----------------|
+| **Question it answers** | "Is this container still alive?" | "Is this container ready to receive traffic?" |
+| **What happens if it fails** | K8s KILLS the container and restarts it | K8s REMOVES it from the Service's endpoint list (stops sending traffic) but doesn't kill it |
+| **Use case** | Detect deadlocks — app is running but stuck | Detect startup delay — app is booting, loading data, not ready yet |
+| **Example for Jira** | `httpGet /healthz` — if Jira process hung, probe fails, container restarts | `httpGet /ready` — Jira takes 30+ seconds to load plugins. During that time, readiness fails so no traffic is sent to a half-started Jira |
+| **Why Swarm didn't have this** | Swarm restarts on crash but can't detect a deadlocked process. No readiness concept at all — traffic hits containers immediately, even during startup |
+
+**How to explain to Andy:**
+"Liveness answers 'is it alive?' — if not, K8s kills and restarts it. Readiness answers 'is it ready for traffic?' — if not, K8s stops routing to it but doesn't kill it. Jira takes thirty-plus seconds to boot and load plugins. Without readiness, users would hit a half-started Jira and get errors. With readiness, K8s waits until the probe passes before sending traffic. Swarm had neither — containers got traffic the instant they started, even if the app wasn't ready."
+
+### ConfigMaps vs values.yaml — Why Both?
+
+**Why can't everything just be in values.yaml?**
+values.yaml is a HELM concept — it defines variables for the chart TEMPLATE. ConfigMap is a KUBERNETES concept — it's an actual resource inside the cluster that pods read at runtime.
+
+The flow:
+1. `values.yaml` defines: `jira_db_host: postgres-jira`
+2. Helm template generates: a ConfigMap YAML with `DB_HOST: postgres-jira`
+3. `helm install` creates the ConfigMap as a real K8s resource
+4. The Jira pod mounts the ConfigMap as environment variables or a file
+
+**Why not just hardcode configs in the Deployment?**
+Because configs change between environments. values.yaml says `jira_db_host: dev-postgres` in dev and `jira_db_host: prod-postgres` in production. The TEMPLATE is the same — only the values change. ConfigMap is where those values LIVE inside the cluster after Helm renders them.
+
+**How to explain to Andy:**
+"values.yaml is the input — what changes between environments. ConfigMap is the output — the actual K8s resource that pods read at runtime. Helm takes values.yaml, renders the template, and creates a ConfigMap inside the cluster. The pod then mounts that ConfigMap as environment variables. This replaces Gomplate entirely — Helm's templating does the same variable substitution, but it's industry-standard and the ConfigMap is tracked as a K8s resource, so you can see it, diff it, and roll it back."
+
+### Services — Types and DNS
+
+**What is a K8s Service?**
+A Service gives a set of pods a stable network identity — a DNS name and IP that doesn't change even when pods restart or move to different nodes. Without it, you'd have to track individual pod IPs that change constantly.
+
+**Service types:**
+
+| Type | What it does | When to use |
+|------|-------------|-------------|
+| **ClusterIP** (default) | Internal-only IP. Only reachable from inside the cluster. | Service-to-service communication. Jira calling its PostgreSQL database. Most common type. |
+| **NodePort** | Exposes the service on a port on every node (30000-32767). Reachable from outside the cluster via `<any-node-ip>:<nodeport>`. | Dev/testing when you need external access without a load balancer. Air-gapped environments where there's no cloud LB. |
+| **LoadBalancer** | Creates an external load balancer (cloud provider specific — AWS ALB/NLB, GCP LB). | Production external access in cloud environments. |
+| **Headless** (clusterIP: None) | No ClusterIP assigned. DNS returns individual pod IPs. | StatefulSets where each pod needs a unique identity (database replicas). |
+
+**How DNS works in K8s:**
+Every Service gets a DNS entry automatically: `<service-name>.<namespace>.svc.cluster.local`
+- Jira calls `postgres-jira.default.svc.cluster.local` to reach its database
+- Or just `postgres-jira` if they're in the same namespace (short name works)
+- This replaces Docker Compose's `depends_on` — services find each other by name, not IP
+- CoreDNS (running in kube-system namespace) handles all resolution
+
+**How to explain to Andy:**
+"In Compose, services find each other through depends_on and Docker's internal DNS. In K8s, every Service gets a DNS name automatically — jira just calls postgres-jira and K8s resolves it. No hardcoded IPs, no depends_on ordering. If the postgres pod restarts on a different node with a different IP, the Service DNS name still works because the Service tracks the pod by label selector, not by IP."
+
+### Persistent Storage — PVCs, PVs, and Scaling
+
+**The relationship: PVC → PV → Storage Backend**
+
+```
+[Pod] → mounts → [PersistentVolumeClaim (PVC)] → binds to → [PersistentVolume (PV)] → backed by → [Storage]
+         |              "I need 50Gi"                  "Here's 50Gi"                    NFS / EBS / hostPath
+         |                                                                                   / Ceph / etc.
+```
+
+- **PVC (PersistentVolumeClaim):** the REQUEST. "I need 50Gi of storage with ReadWriteOnce access." The pod declares this.
+- **PV (PersistentVolume):** the PROVISION. "Here's a 50Gi volume backed by NFS at server:/exports/jira." The admin or StorageClass creates this.
+- **StorageClass:** automates PV creation. Instead of an admin manually creating each PV, the StorageClass says "when someone requests storage, automatically provision it from this backend." Dynamic provisioning.
+- **Binding:** K8s matches a PVC to an available PV that meets its requirements (size, access mode, storage class). Once bound, that PV belongs to that PVC until released.
+
+**Reclaim Policies (critical — this is what makes or breaks data safety):**
+
+| Policy | What happens when PVC is deleted | Use case |
+|--------|--------------------------------|----------|
+| **Retain** | PV and its data are KEPT. Admin must manually clean up. | Production databases. Jira data, Bitbucket repos. Never auto-delete production data. |
+| **Delete** | PV and its backing storage are DELETED automatically. | Ephemeral test data. Dev environments where data doesn't matter. |
+| **Recycle** (deprecated) | PV is wiped (rm -rf) and made available again. | Don't use — deprecated. |
+
+**How to explain storage scaling to Andy (hundreds of GBs to TBs):**
+
+"For the IBM migration, most services needed tens of gigabytes — Jira at fifty gig, Bitbucket at a hundred gig for git repos, Confluence at fifty. But the pattern scales the same way for terabytes. The key decisions are:
+
+First, the storage backend. For on-prem — which is what matters for Anduril — you'd use NFS for shared storage that multiple pods can read, or a distributed storage system like Ceph or Longhorn for higher performance. For cloud, EBS gives you block storage per pod, EFS gives you shared. The choice depends on whether the service needs shared access (multiple pods reading the same data) or dedicated access (one pod owns it).
+
+Second, StorageClass handles dynamic provisioning — you don't pre-create PVs for every service. The StorageClass defines: which provisioner (NFS, Ceph, EBS), what parameters (IOPS, encryption), and what reclaim policy. When a PVC requests 500Gi, the StorageClass automatically provisions it.
+
+Third, for real scale — terabytes, high IOPS — you'd use StatefulSets instead of Deployments. A StatefulSet gives each pod its own PVC that follows it across restarts and reschedules. Database clusters (PostgreSQL replicas, Elasticsearch nodes) use this pattern. Each replica gets its own volume, its own stable hostname, and ordered startup.
+
+Fourth, backup and recovery. PVs need a backup strategy independent of K8s — typically VolumeSnapshots (K8s-native) or external backup tools that snapshot the underlying storage. For the IBM migration, I set up a nightly snapshot job for all production PVs."
+
+**Data migration from Docker volumes to K8s PVs (the hardest part):**
+
+"The existing services had data in Docker volumes — Jira's database, Bitbucket's git repos, Confluence's pages. I couldn't just delete that data and start fresh — six hundred users' work was in there. The migration process for each stateful service was:
+
+1. Create the PV and PVC in K8s with the right size and Retain policy
+2. Mount the PV to a temporary migration pod
+3. From the Docker host, rsync the Docker volume data into the K8s PV via the migration pod
+4. Verify checksums — data integrity check
+5. Deploy the service with Helm, pointing to the PVC
+6. Validate the service starts and reads the data correctly
+7. Keep the old Docker volume as a backup for one release cycle
+
+The tricky part was Bitbucket — a hundred gig of git repos. The rsync took hours. I ran it during a maintenance window on a Saturday, with the old Swarm instance still running as fallback. Once the K8s service came up and users verified their repos were intact, we decommissioned the Swarm instance."
+
+### Shared Helm Library Chart — How It Actually Works
+
+**What is a library chart?**
+A Helm library chart is a chart that contains ONLY templates — no deployable resources. It defines common patterns that other charts include and reuse. Think of it like a shared code library but for K8s YAML templates.
+
+**How it works mechanically:**
+1. The library chart (e.g., `common-lib`) defines named templates like:
+   - `common-lib.deployment` — standard Deployment template with health checks, resource limits, labels
+   - `common-lib.service` — standard Service template with ClusterIP, port mapping
+   - `common-lib.labels` — standard label set (app, version, env, managed-by)
+   - `common-lib.probes` — standard liveness/readiness probes with default timeouts
+
+2. Each service chart (e.g., `jira-chart`) declares the library as a dependency in `Chart.yaml`:
+   ```yaml
+   dependencies:
+     - name: common-lib
+       version: "1.0.0"
+       repository: "file://../common-lib"
+   ```
+
+3. Inside the service chart's templates, it CALLS the library templates:
+   ```yaml
+   {{- include "common-lib.deployment" . }}
+   ```
+   This renders the standard Deployment template but with the service's own values (image, replicas, etc.)
+
+4. The service chart's `values.yaml` provides the service-specific values that the library template uses.
+
+**Why this matters:**
+"Without the library, every service chart duplicates the same patterns — health check definitions, label standards, resource limit structure. Nine services means nine copies of the same boilerplate. With the library, I define the pattern once, and every chart inherits it. If I need to change how health checks work — say, increase the timeout — I change it in the library and every service gets the update on next deploy."
+
+**How to explain to Andy:**
+"The shared library chart is like a base class. It defines common templates — Deployment structure, Service definition, standard labels, probe defaults. Each service chart inherits from it and just provides its own values: image name, port, storage size. If I need to update a pattern across all nine services — like adding a new standard label or changing probe timeouts — I change the library once, bump the version, and every chart picks it up."
+
+### values.yaml — What Can It Contain?
+
+**values.yaml is NOT just for environments.** It's the entire configuration surface of a Helm chart. It can contain:
+
+- **Environment-specific:** DB_HOST, replicas, resource sizes (these change per env)
+- **Service-specific:** image name, port, volume size, feature flags (these are constant across environments)
+- **Operational:** log level, debug mode, maintenance mode flags
+- **Integration:** URLs to other services, API keys (via reference to Secrets)
+- **Chart behavior:** enable/disable optional components, toggle features
+
+**The override chain (higher overrides lower):**
+1. Library chart defaults (lowest priority)
+2. Service chart's `values.yaml` (service-specific defaults)
+3. Environment-specific values file (`values-prod.yaml`) — passed with `-f` flag
+4. Command-line overrides (`--set replicas=3`) (highest priority)
+
+**How to explain to Andy:**
+"values.yaml is the full configuration surface — not just environment differences. The service chart's default values.yaml defines everything: image, ports, storage, feature flags. Then environment-specific files override just what changes — replicas, resource sizes, database hosts. Helm merges them with a clear precedence chain. This is what replaced Gomplate — same variable substitution concept, but standard tooling with a clear override order."
 
 ### Bridging to Anduril
 "Your setup today — Podman Compose files, manual deploys, Makefiles maybe — that's exactly where IBM was when I started. The path I'd propose is the same: define standards, pick a pilot service, convert to Helm, validate, then service by service. With your pace, we could have the first service migrated in two weeks, and if it doesn't add value, we stop. No big-bang risk."
