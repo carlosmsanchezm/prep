@@ -9,6 +9,100 @@
 
 ---
 
+## GAPS — Review This Before Each Drawing Attempt
+
+> These are the things you missed on your first attempt. Read this section FIRST before redrawing. Once you nail all of these, remove them from this list.
+
+### Gap 1: Build & Deployment Layer — The make command chain
+
+You drew the Dev & Config layer fine but missed HOW make connects to everything in the Build & Deployment layer. The chain is:
+
+```
+make command (entry point)
+    ├── triggers → Subdirectory Makefiles (per-service build targets)
+    │                 ├── invokes → Custom shell scripts (deployment glue)
+    │                 └── invokes → Python scripts (config generation, validation)
+    │
+    ├── triggers → Custom shell scripts (directly too, not just through sub-makes)
+    └── triggers → Python scripts (directly too)
+
+Then BOTH shell scripts and Python scripts call:
+    └── docker-compose / docker stack deploy (manual execution)
+```
+
+The key: `make` doesn't just trigger one thing — it fans out to sub-makefiles AND directly to scripts. The sub-makefiles ALSO call scripts. Multiple paths to the same docker commands. That's why it's messy.
+
+**What "subdirectory Makefiles" means:** Each service has its own directory with its own Makefile. The root Makefile includes them (via `.mk` files). So `make deploy-jira` runs the target defined in `jira.mk`, which calls `scripts/deploy-jira.sh`, which runs `docker-compose -f jira/docker-compose.yml up -d`.
+
+**What "build target" means:** A named command in a Makefile. `deploy-jira`, `deploy-all`, `build-images`, `clean`. You type `make deploy-jira` and it runs that target's commands.
+
+### Gap 2: What "deployment glue" means (shell scripts)
+
+You knew Python scripts handle config generation. The shell scripts are the "deployment glue" — they're the scripts that actually EXECUTE the deployment. They:
+
+- Call `docker-compose up -d` or `docker stack deploy` with the right compose file
+- Set environment variables before running docker commands
+- Run health checks after deployment (`curl http://localhost:8080/status`)
+- Handle sequencing: "deploy postgres first, wait for it to be healthy, THEN deploy Jira"
+- Clean up old containers: `docker system prune`, `docker volume rm`
+- Tail logs for verification: `docker logs -f jira`
+
+Example of what `scripts/deploy-jira.sh` might look like:
+```bash
+#!/bin/bash
+set -euo pipefail
+echo "Deploying Jira..."
+# Wait for postgres to be ready
+until docker exec postgres-jira pg_isready; do sleep 2; done
+# Deploy Jira
+docker-compose -f services/jira/docker-compose.yml up -d
+# Health check
+sleep 30
+curl -sf http://localhost:8080/status || { echo "Jira health check failed"; exit 1; }
+echo "Jira deployed successfully"
+```
+
+That's "deployment glue" — it's not the config, it's not the image, it's the SCRIPT that ties deployment steps together and handles ordering and verification.
+
+### Gap 3: Container Runtime layer — Docker Compose files, Swarm, Volumes
+
+You missed some boxes in the Container Runtime section. Three components:
+
+1. **Docker Compose files** — the `docker-compose.yml` per service. These define: which image, which ports, which volumes, which environment variables, restart policy. This is the SERVICE DEFINITION — what to run and how to run it.
+
+2. **Docker Swarm** — the ORCHESTRATOR. Compose defines the services, Swarm runs them across nodes. Swarm provides: container restart on failure, basic load balancing, multi-node deployment via `docker stack deploy`. But NO rolling updates, NO health checks gating rollout, NO resource limits enforcement.
+
+3. **Docker Volumes** — PERSISTENT DATA. Containers are ephemeral — when a container dies, its filesystem dies. Volumes persist data outside the container lifecycle. Jira's database, Bitbucket's git repos, Confluence's pages — all in Docker volumes. These are "mounted by" the services, meaning the container's filesystem at a specific path (like `/var/atlassian/jira/data`) actually reads/writes to the Docker volume on the host.
+
+The flow: Shell scripts call `docker-compose up` → Compose reads the docker-compose.yml (service definitions) → Swarm orchestrates the containers → Volumes are mounted into the running containers.
+
+### Gap 4: The 9 Services (draw these inside the cluster box)
+
+Don't just say "9 services." List them. Andy might ask about a specific one:
+
+| Service | What it does | Why it matters |
+|---------|-------------|----------------|
+| **Jira** | Issue tracking | Most complex config — custom plugins, database schema |
+| **Bitbucket** | Git hosting (source code) | Largest storage — 100Gi of git repos |
+| **Confluence** | Wiki / documentation | Large storage — pages, attachments |
+| **Jenkins** | CI/CD for engineering teams | Pipeline configs as code, build agents |
+| **Artifactory** | Artifact registry | OTHER services depend on it — pull deps from here |
+| **Crowd** | SSO / user directory | Auth for all other services — if Crowd is down, nobody logs in |
+| **Accounts-API** | User management | Custom app (not off-the-shelf like Jira) |
+| **Mailman** | Email lists | Simplest service — migrated first as pilot |
+| **HTTPD-UI** | Web frontend | Nginx-based reverse proxy, straightforward |
+
+**Migration order mattered:** Mailman first (simplest, proves the process), then Accounts-API (small custom app), then gradually to the complex ones (Jira, Bitbucket). Crowd was tricky because other services depend on it for auth — had to migrate it with zero downtime.
+
+### How to Check Your Gaps Next Time
+
+After each drawing attempt:
+1. Open this GAPS section — did you remember everything listed here?
+2. Open the mermaid diagram in `ibm-migration-answers.md` — compare component-by-component
+3. For anything you STILL missed, add it to this section with a note on WHY you forgot it
+
+---
+
 ## Coaching: How to Present This
 
 ### Opening Line
