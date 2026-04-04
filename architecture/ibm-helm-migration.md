@@ -45,17 +45,74 @@ Write pain points on the side:
 
 Say: "This is what I inherited. A single Git repo, per-service configs and templates that feed through Gomplate — a custom templating engine nobody outside this team uses. Gomplate generates config files that feed into the make command, which is the single entry point for everything. Make triggers per-service Makefiles, Python scripts, and shell scripts, which eventually call docker-compose up or docker stack deploy. Five layers of indirection before a container starts. Nine services, six hundred users, no rollback, no drift detection. If something broke, you'd docker-log your way through, trace back through the scripts, and fix by hand."
 
-**Step 2 — Draw the AFTER (bottom half — show the contrast):**
+**Step 2 — Draw the AFTER (bottom half — two parts: the K8s architecture + the workflow):**
 
-Draw a clean, simple flow:
+This step has two pieces. First draw what each service BECAME in K8s (the architecture), then draw the workflow (how developers and CI/CD interact with it).
+
+**Step 2a — The K8s Architecture (what each service looks like):**
+
+Draw a box labeled "K8s Cluster" and inside it, show one service as an example (Jira):
 
 ```
-[Git Repo] → [Helm Charts] → [CI/CD Pipeline] → [Registry] → [Dev Cluster] → [Test Cluster]
-              values.yaml      build → lint →      versioned     auto-deploy     promote
-              per environment  test → package      images
+┌─── K8s Cluster ──────────────────────────────────────────────────────┐
+│                                                                       │
+│  ┌── Jira (example — same pattern for all 9 services) ───────────┐   │
+│  │                                                                │   │
+│  │  [Deployment]          [Service]           [ConfigMap]          │   │
+│  │  - image: jira:8.x     - ClusterIP        - DB_HOST: postgres  │   │
+│  │  - replicas: 1         - port 8080         - MEMORY: 4g        │   │
+│  │  - resource limits     - selector: app=jira - FEATURE_FLAGS     │   │
+│  │  - health checks                                                │   │
+│  │     liveness: /healthz                     [Secret]             │   │
+│  │     readiness: /ready                      - DB_PASSWORD        │   │
+│  │                                            - LICENSE_KEY        │   │
+│  │  [PersistentVolumeClaim]                                        │   │
+│  │  - 50Gi for Jira data                                           │   │
+│  │  - StorageClass: standard                                       │   │
+│  │                                                                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                       │
+│  Same pattern x9: Bitbucket, Confluence, Jenkins, Artifactory,       │
+│                    Crowd, Accounts-API, Mailman, HTTPD-UI             │
+│                                                                       │
+│  [Shared Library Chart]                                               │
+│  - Common templates: health checks, resource limits, labels          │
+│  - Every service chart inherits from this                            │
+│                                                                       │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-Say: "Here's where I took them. Helm charts for all nine services — declarative, versioned, rollbackable. CI/CD pipeline handles build, lint, package, deploy, and test — all automated on push. Each environment gets its own values.yaml — no more Gomplate. One command deploys, one command rolls back. Cut release prep forty percent. The platform went from five layers of manual scripting to a single Helm upgrade command."
+Say: "Each service became the same pattern in Kubernetes. Take Jira: a Deployment defines the container image, replicas, resource limits, and health checks — liveness and readiness probes that didn't exist in Swarm. A Service gives it a stable DNS name so other services find it without hardcoded IPs — replaces Compose's depends_on. A ConfigMap holds the non-sensitive config that used to be in Gomplate templates. A Secret holds passwords and license keys — no more plain text in env files. And a PersistentVolumeClaim for data that survives pod restarts — this was the hardest part for stateful services like Jira and Bitbucket.
+
+I built a shared library chart with common templates — health checks, resource limits, standard labels — so every service chart inherits the same patterns. No copy-paste between charts."
+
+**The Compose-to-K8s translation (know this for when Andy asks "how did you actually make it work?"):**
+
+| Docker Compose field | K8s equivalent | Notes |
+|---------------------|----------------|-------|
+| `image:` | Deployment `.spec.containers[].image` | Same image, just referenced differently |
+| `ports:` | Service (ClusterIP or NodePort) | Service provides stable DNS name + load balancing |
+| `volumes:` | PersistentVolumeClaim + PersistentVolume | Hardest part — need StorageClass, reclaim policy |
+| `environment:` | ConfigMap (non-sensitive) + Secret (sensitive) | Replaces .env files and Gomplate substitution |
+| `depends_on:` | Not needed — K8s services use DNS discovery | `jira` calls `postgres-jira.default.svc.cluster.local` |
+| `restart: always` | Default in K8s (restartPolicy: Always) | Plus health checks that Swarm didn't have |
+| `deploy.replicas:` | Deployment `.spec.replicas` | Same concept, but K8s adds HPA for auto-scaling |
+| `deploy.resources:` | Deployment `.spec.containers[].resources` | requests + limits — K8s enforces these, Swarm didn't |
+
+**What was hardest:**
+"Persistent storage for stateful services. In Compose, a named volume is one line. In K8s, it's a PersistentVolumeClaim bound to a PersistentVolume with the right StorageClass and reclaim policy. Wrong reclaim policy and you lose the database on pod restart. I had to design the storage layer carefully — Retain policy for production databases, Delete for ephemeral test data. And migrating existing Jira data from Docker volumes into K8s PVs without downtime required a data sync script I wrote specifically for the migration."
+
+**Step 2b — The Workflow (how developers and CI/CD interact):**
+
+Draw the workflow flow:
+
+```
+[Developer] → [Git Repo] → [Helm Charts] → [CI/CD Pipeline] → [Dev Cluster] → [Test Cluster]
+                             values.yaml     build/lint/          auto-deploy     promote
+                             per env         test/package
+```
+
+Say: "The workflow is clean now. Developer clones, modifies Helm chart values, runs helm lint and helm template locally to validate, pushes to Git. CI/CD triggers on push — builds the image, lints the chart, packages it, deploys to the dev cluster automatically. After tests pass on dev, promote to the test cluster. Production promotion is a single helm upgrade command with the production values file."
 
 **Step 3 — Draw the migration plan (side or separate area):**
 
