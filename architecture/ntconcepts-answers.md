@@ -496,6 +496,129 @@ flowchart TB
 
 ---
 
+## Chart 3b: Nightwatch RKE2 — DevOps-Focused (Whiteboard Version)
+
+> **This is what you study for the whiteboard.** Infrastructure and operations — not application workflows. Draw THIS, reference Chart 3 only if Andy probes into application-level detail.
+
+```mermaid
+---
+config:
+  layout: elk
+  theme: dark
+---
+flowchart TD
+    subgraph AWS_Services["Core AWS Services"]
+        direction LR
+        ECR["ECR<br/>Container Registry<br/>(images pre-pushed)"]:::aws
+        S3["S3 Buckets<br/>- terraform-state<br/>- pipeline-artifacts"]:::aws
+        SecretsManager["Secrets Manager<br/>DB passwords, API keys"]:::aws
+        IAM["IAM<br/>OIDC Provider<br/>IRSA roles per pod"]:::aws
+    end
+
+    subgraph VPC["VPC: ntc-2023-studiodx-demo (Private Subnets)"]
+        direction TB
+
+        NLB["NLB<br/>(public subnet — only entry point)"]:::aws
+
+        subgraph RKE2_Cluster["RKE2 Kubernetes Cluster"]
+            direction TB
+
+            subgraph Control_Plane["Control Plane (ASG: 3 nodes)"]
+                direction LR
+                CP1["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
+                CP2["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
+                CP3["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
+            end
+
+            subgraph Workers["Worker Nodes"]
+                direction LR
+                subgraph CPU_ASG["CPU ASG"]
+                    CPU1["m5a.2xlarge<br/>rke2-agent"]:::k8s
+                end
+                subgraph GPU_ASG["GPU ASG"]
+                    GPU1["g4dn.xlarge<br/>rke2-agent<br/>+ NVIDIA Operator"]:::k8s
+                end
+            end
+
+            subgraph Infra_Services["Infrastructure Services (I deployed + managed)"]
+                ArgoCD["ArgoCD<br/>GitOps — syncs from Git"]:::gitops
+                Istio["Istio<br/>service mesh + ingress"]:::k8s
+                Autoscaler["Cluster Autoscaler<br/>scales ASGs via IRSA"]:::k8s
+                ExtSecrets["External Secrets<br/>syncs Secrets Manager<br/>→ K8s Secrets"]:::k8s
+                Keycloak["Keycloak<br/>SSO for all services"]:::k8s
+                Monitoring["Prometheus + Grafana + Loki<br/>metrics, dashboards, logs"]:::k8s
+            end
+
+            subgraph App_Workloads["Application Workloads (ran on top)"]
+                Kubeflow["Kubeflow<br/>(notebooks, pipelines, model serving)<br/>12 data scientists · tripled throughput"]:::app
+            end
+        end
+
+        subgraph Data_Services["Managed Data Services"]
+            direction LR
+            RDS["RDS PostgreSQL<br/>ArgoCD DB · Keycloak DB<br/>Kubeflow DB"]:::aws
+            EFS["EFS<br/>shared pod storage"]:::aws
+        end
+    end
+
+    %% DevOps Engineer flow (GitOps)
+    DevOps["DevSecOps Engineer"]:::user -- "git push" --> GitRepo["argoflow Git Repo<br/>(source of truth)"]:::gitops
+    GitRepo -. "watches" .-> ArgoCD
+    ArgoCD -. "syncs manifests<br/>to cluster" .-> Infra_Services
+    ArgoCD -. "deploys" .-> App_Workloads
+
+    %% External access
+    NLB -- "TCP traffic" --> Istio
+
+    %% AWS integrations (IRSA-based)
+    Autoscaler -- "assumes IAM role<br/>(IRSA)" --> IAM
+    IAM -. "modify ASG<br/>desired count" .-> GPU_ASG
+    IAM -. "modify ASG" .-> CPU_ASG
+    ExtSecrets -- "reads secrets<br/>(IRSA)" --> SecretsManager
+    CPU1 -- "pull images<br/>(registries.yaml → ECR)" --> ECR
+    GPU1 -- "pull images" --> ECR
+
+    %% Storage connections
+    Keycloak -- "DB connection" --> RDS
+    ArgoCD -- "DB connection" --> RDS
+    Kubeflow -- "DB + artifacts" --> RDS
+    Kubeflow -- "artifacts" --> S3
+    App_Workloads -- "mount shared<br/>storage" --> EFS
+
+    %% Terraform manages all AWS
+    Terraform["Terraform<br/>(manages all AWS infra)"]:::iac -- "provisions" --> AWS_Services
+    Terraform -- "provisions" --> VPC
+
+    %% Ansible bootstraps nodes
+    Ansible["Ansible<br/>(bootstraps RKE2 nodes)"]:::iac -- "installs rke2 binary<br/>writes config.yaml<br/>writes registries.yaml<br/>opens firewall ports<br/>starts rke2 service" --> Control_Plane
+    Ansible -- "joins workers" --> Workers
+
+    classDef aws fill:#fff3cd,stroke:#856404,stroke-width:2px
+    classDef k8s fill:#f8d7da,stroke:#721c24,stroke-width:2px
+    classDef gitops fill:#cce5ff,stroke:#004085,stroke-width:2px
+    classDef app fill:#e2e3e5,stroke:#383d41,stroke-width:2px
+    classDef user fill:#d4edda,stroke:#155724,stroke-width:2px
+    classDef iac fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+```
+
+### What This DevOps-Focused Diagram Shows
+
+**Compared to Chart 3 (full reference), this diagram:**
+- Removes: oauth2-proxy auth chain, KServe, Knative, KF Pipelines details, data scientist user flow
+- Adds: Terraform (provisions all AWS infra), Ansible (bootstraps RKE2 nodes)
+- Separates: Infrastructure Services (what I managed) from Application Workloads (what ran on top)
+- Emphasizes: IRSA connections (how pods access AWS), registries.yaml (how images pull in air-gap), GitOps flow (ArgoCD syncs from Git)
+
+**The story it tells:**
+1. **Terraform provisions the AWS foundation** — VPC, subnets, ASGs, RDS, EFS, ECR, IAM roles
+2. **Ansible bootstraps the RKE2 nodes** — installs binary, writes config, opens ports, starts service
+3. **ArgoCD deploys everything inside the cluster** — syncs manifests from Git, no manual kubectl
+4. **IRSA gives pods AWS access** — Cluster Autoscaler assumes an IAM role to scale ASGs, External Secrets assumes a role to read Secrets Manager
+5. **registries.yaml redirects image pulls** — containerd pulls from ECR instead of internet
+6. **Application workloads run on top** — Kubeflow for the data science team, but that's their layer, not mine
+
+---
+
 ### Whiteboard Drawing Guide: 4 Layers (draw progressively)
 
 The full diagram has ~25 components. On a whiteboard you can't draw all of it. Instead, draw it in 4 layers — each takes 2-3 minutes. Andy will stop you on the layer he wants to dig into.
