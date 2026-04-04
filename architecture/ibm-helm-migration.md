@@ -512,12 +512,14 @@ For IBM, the pipeline was functional validation — not the full security-scanni
 | Smoke Test | Shell scripts: `curl` health endpoints | Verify each service responds — hit web UI, check HTTP 200 |
 | Promote | `helm upgrade --install -f values-test.yaml` | Deploy to test cluster after dev passes |
 
-**No SonarQube, no Trivy, no Kyverno at IBM.** This was internal tooling, not a DoD production system with compliance mandates. Security scanning came at later roles:
-- **VivSoft:** Trivy (CVE scan), Kyverno (admission policy — blocks non-Iron Bank images), OSCAP (STIG compliance)
+**Pipeline-level scanning wasn't in place yet at IBM.** The hosts were STIG-hardened (OSCAP scans, CIS benchmarks on the K8s cluster — that's on the resume), but the CI/CD pipeline itself didn't have automated image scanning like Trivy or admission policies like Kyverno integrated. The Helm migration was step one — get repeatable, rollbackable deployments working. Pipeline security scanning was the next step I was building toward. The platform was internal dev tooling (Jira, Jenkins, Bitbucket), not the mission software itself, so the infrastructure compliance (STIG'd hosts, hardened cluster) was in place, but pipeline-level maturity was still growing.
+
+At later roles, I brought that maturity forward:
+- **VivSoft:** Trivy (CVE scan in pipeline), Kyverno (admission policy — blocks non-Iron Bank images), OSCAP (STIG compliance on AMIs)
 - **NTConcepts:** Trivy + SonarQube in CI pipeline, OPA policies on Terraform plans
 
 **If Andy asks about security in the pipeline:**
-"For the IBM platform, the pipeline focused on functional validation — lint, template, deploy, smoke test. It was internal dev tooling, not a customer-facing or compliance-driven system. Security scanning like Trivy, SonarQube, and admission policies like Kyverno are things I brought in at VivSoft and NTConcepts where DoD compliance mandated it. If I were building this pipeline today — or for Anduril — I'd add image scanning and policy enforcement from the start."
+"The hosts were STIG-hardened — OSCAP scans, CIS benchmarks on the cluster. But the pipeline itself didn't have automated image scanning yet. The Helm migration was step one: get the deployment process repeatable and safe. Step two was going to be adding Trivy for image scanning and admission policies. I didn't get to finish that at IBM, but I brought those patterns to VivSoft and NTConcepts where I integrated Trivy, Kyverno, and OSCAP into the full pipeline. If I were building this for Anduril, I'd add image scanning from day one — the pipeline's already there, just add a scan stage before deploy."
 
 ### Developer Connection to Dev/Test Environments
 
