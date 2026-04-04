@@ -505,6 +505,7 @@ For IBM, the pipeline was functional validation — not the full security-scanni
 |-------|------|-------------|
 | Build | `docker build` | Build container image from Dockerfile |
 | Push | `docker push` to Artifactory | Store versioned image in our registry (Artifactory doubled as container registry) |
+| **Code Scan** | **SonarQube** | **Static analysis — security vulnerabilities, code quality, security hotspots. Quality gate must pass before deploy.** |
 | Lint | `helm lint` | Validate chart syntax — catches YAML errors, missing values, bad templates |
 | Template | `helm template` | Dry-run render — generates the actual K8s YAML without deploying. Catches template logic errors. |
 | Package | `helm package` | Create versioned chart archive (.tgz) — stored in Artifactory as a Helm chart repo |
@@ -512,14 +513,16 @@ For IBM, the pipeline was functional validation — not the full security-scanni
 | Smoke Test | Shell scripts: `curl` health endpoints | Verify each service responds — hit web UI, check HTTP 200 |
 | Promote | `helm upgrade --install -f values-test.yaml` | Deploy to test cluster after dev passes |
 
-**Pipeline-level scanning wasn't in place yet at IBM.** The hosts were STIG-hardened (OSCAP scans, CIS benchmarks on the K8s cluster — that's on the resume), but the CI/CD pipeline itself didn't have automated image scanning like Trivy or admission policies like Kyverno integrated. The Helm migration was step one — get repeatable, rollbackable deployments working. Pipeline security scanning was the next step I was building toward. The platform was internal dev tooling (Jira, Jenkins, Bitbucket), not the mission software itself, so the infrastructure compliance (STIG'd hosts, hardened cluster) was in place, but pipeline-level maturity was still growing.
+**Security at IBM had two layers:**
+- **Infrastructure:** STIG-hardened hosts (OSCAP scans), CIS benchmarks on the K8s cluster — that's on the resume
+- **Pipeline:** SonarQube for static code analysis and security scanning — this WAS integrated. Code got scanned for vulnerabilities, code quality issues, and security hotspots before deployment. What we didn't have yet was container image scanning (Trivy) or K8s admission policies (Kyverno) — those are container-specific and came at later roles where the container security maturity was higher.
 
-At later roles, I brought that maturity forward:
-- **VivSoft:** Trivy (CVE scan in pipeline), Kyverno (admission policy — blocks non-Iron Bank images), OSCAP (STIG compliance on AMIs)
+At later roles, I added the container-layer security:
+- **VivSoft:** Trivy (container image CVE scan), Kyverno (admission policy — blocks non-Iron Bank images), OSCAP (STIG compliance on AMIs)
 - **NTConcepts:** Trivy + SonarQube in CI pipeline, OPA policies on Terraform plans
 
 **If Andy asks about security in the pipeline:**
-"The hosts were STIG-hardened — OSCAP scans, CIS benchmarks on the cluster. But the pipeline itself didn't have automated image scanning yet. The Helm migration was step one: get the deployment process repeatable and safe. Step two was going to be adding Trivy for image scanning and admission policies. I didn't get to finish that at IBM, but I brought those patterns to VivSoft and NTConcepts where I integrated Trivy, Kyverno, and OSCAP into the full pipeline. If I were building this for Anduril, I'd add image scanning from day one — the pipeline's already there, just add a scan stage before deploy."
+"We had SonarQube for static analysis — code scanning, vulnerability detection, quality gates. And the hosts were STIG-hardened with OSCAP. What I added at later roles was the container-specific layer: Trivy for image CVE scanning before deployment, and Kyverno for admission policies that block unapproved images at the API server. At IBM, the code was scanned but the container images weren't — that's a maturity step I brought forward at VivSoft and NTConcepts. For Anduril, I'd layer both: SonarQube or similar for code, Trivy for images, and admission policies if you move to K8s."
 
 ### Developer Connection to Dev/Test Environments
 
