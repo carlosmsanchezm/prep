@@ -585,12 +585,22 @@ flowchart TD
     Kubeflow -- "artifacts" --> S3
     App_Workloads -- "mount shared<br/>storage" --> EFS
 
+    %% Network security (Bird-Dog connection)
+    subgraph BirdDog["Bird-Dog Network Architecture"]
+        TGW["Transit Gateway<br/>(hub — shared via RAM)"]:::network
+        NFW["Network Firewall<br/>deny-by-default<br/>only allowlisted domains:<br/>ECR, S3, STS endpoints"]:::network
+    end
+
+    VPC -- "TGW attachment<br/>(spoke)" --> TGW
+    TGW -- "all egress" --> NFW
+    NFW -- "allowed traffic only<br/>(ECR, S3, STS)" --> Internet["Internet<br/>(controlled egress)"]:::network
+
     %% Terraform manages all AWS
-    Terraform["Terraform<br/>(manages all AWS infra)"]:::iac -- "provisions" --> AWS_Services
+    Terraform["Terraform<br/>(manages all AWS infra:<br/>VPC, ASGs, RDS, EFS,<br/>ECR, IAM, TGW attachment)"]:::iac -- "provisions" --> AWS_Services
     Terraform -- "provisions" --> VPC
 
     %% Ansible bootstraps nodes
-    Ansible["Ansible<br/>(bootstraps RKE2 nodes)"]:::iac -- "installs rke2 binary<br/>writes config.yaml<br/>writes registries.yaml<br/>opens firewall ports<br/>starts rke2 service" --> Control_Plane
+    Ansible["Ansible<br/>(bootstraps RKE2 nodes:<br/>install binary, config.yaml,<br/>registries.yaml, firewall ports,<br/>start rke2 service)"]:::iac -- "bootstraps" --> Control_Plane
     Ansible -- "joins workers" --> Workers
 
     classDef aws fill:#fff3cd,stroke:#856404,stroke-width:2px
@@ -599,6 +609,7 @@ flowchart TD
     classDef app fill:#e2e3e5,stroke:#383d41,stroke-width:2px
     classDef user fill:#d4edda,stroke:#155724,stroke-width:2px
     classDef iac fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    classDef network fill:#fce4ec,stroke:#c62828,stroke-width:2px
 ```
 
 ### What This DevOps-Focused Diagram Shows
@@ -610,12 +621,16 @@ flowchart TD
 - Emphasizes: IRSA connections (how pods access AWS), registries.yaml (how images pull in air-gap), GitOps flow (ArgoCD syncs from Git)
 
 **The story it tells:**
-1. **Terraform provisions the AWS foundation** — VPC, subnets, ASGs, RDS, EFS, ECR, IAM roles
-2. **Ansible bootstraps the RKE2 nodes** — installs binary, writes config, opens ports, starts service
-3. **ArgoCD deploys everything inside the cluster** — syncs manifests from Git, no manual kubectl
-4. **IRSA gives pods AWS access** — Cluster Autoscaler assumes an IAM role to scale ASGs, External Secrets assumes a role to read Secrets Manager
-5. **registries.yaml redirects image pulls** — containerd pulls from ECR instead of internet
-6. **Application workloads run on top** — Kubeflow for the data science team, but that's their layer, not mine
+1. **Terraform provisions the AWS foundation** — VPC, subnets, ASGs, RDS, EFS, ECR, IAM roles, TGW attachment to Bird-Dog
+2. **The VPC is a spoke in the Bird-Dog network** — all egress routes through Transit Gateway to Network Firewall. Deny-by-default — only allowlisted domains (ECR, S3, STS) can be reached. This is controlled-egress, not open internet.
+3. **Ansible bootstraps the RKE2 nodes** — installs binary, writes config, writes registries.yaml, opens ports, starts service
+4. **ArgoCD deploys everything inside the cluster** — syncs manifests from Git, no manual kubectl
+5. **IRSA gives pods AWS access** — Cluster Autoscaler assumes an IAM role to scale ASGs, External Secrets assumes a role to read Secrets Manager
+6. **registries.yaml redirects image pulls** — containerd pulls from ECR (on the allowlist) instead of public internet
+7. **Application workloads run on top** — Kubeflow for the data science team, but that's their layer, not mine
+
+**Why the Bird-Dog connection matters for Anduril:**
+"This cluster sat inside our Bird-Dog hub-and-spoke network. All egress went through Network Firewall with deny-by-default. Only ECR, S3, and STS endpoints were allowlisted. So even though we had internet, it was controlled — no unauthorized outbound calls. That's the same posture Anduril needs: controlled egress through a diode, only known-good destinations. The pattern scales from 'controlled internet' to 'fully air-gapped' — same registries.yaml, same ArgoCD, just swap ECR for local Nexus and the firewall for a diode."
 
 ---
 
