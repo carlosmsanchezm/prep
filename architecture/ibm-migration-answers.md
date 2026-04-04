@@ -154,7 +154,7 @@ Write these next to or below the diagram:
 3. **Templatized the manifests into Helm charts** — turned hardcoded values into `{{ .Values.x }}` references, created values.yaml per environment
 4. **Tested with `helm template`** (dry-run render) → verified output YAML matched what the Compose files produced
 5. **Deployed to dev cluster with `helm install`** → validated services came up, connected to each other, and served traffic
-6. **Built the Jenkins CI pipeline** around it — build image → lint chart → package → deploy → test → promote
+6. **Built a CI/CD pipeline** around it — build image → lint chart → package → deploy → test → promote
 
 ### How to Explain It to Andy
 
@@ -187,7 +187,7 @@ flowchart TB
         B1["Remote Git repository"]:::git
     end
 
-    subgraph CI_CD_Pipeline["CI/CD Pipeline (Jenkins)"]
+    subgraph CI_CD_Pipeline["CI/CD Pipeline"]
         C1["Build Docker images"]:::docker
         C2["Push to container registry"]:::docker
         C3["Helm lint"]:::helm
@@ -243,7 +243,7 @@ flowchart TB
 
 **Developer Local Environment:** Developer clones the repo, modifies Helm charts locally, runs `helm lint` and `helm template` to validate, then `helm install` to test on Minikube/Docker Desktop. Uses kubectl for debugging. Commits and pushes.
 
-**Version Control → CI/CD:** Push triggers Jenkins pipeline. Pipeline builds Docker images, pushes to registry, lints Helm charts, packages them, deploys to Dev cluster, runs tests, promotes to Test.
+**Version Control → CI/CD:** Push triggers the pipeline. Pipeline builds Docker images, pushes to registry, lints Helm charts, packages them, deploys to Dev cluster, runs tests, promotes to Test.
 
 **Helm Charts (center):** The key differentiator. Application charts (one per service), shared library charts (common patterns like health checks, resource limits), and values.yaml per environment. Everything is templated, versioned, rollbackable.
 
@@ -255,7 +255,7 @@ flowchart TB
 |------------------------|-------------------|
 | Docker Compose + Swarm | Kubernetes + Helm |
 | Gomplate (custom templating) | Helm templates (industry standard) |
-| Makefiles + Python + Shell scripts | Jenkins CI pipeline |
+| Makefiles + Python + Shell scripts | CI/CD pipeline |
 | Manual release checklist | Automated: build → lint → test → deploy |
 | No rollback | `helm rollback` to any previous revision |
 | No drift detection | Helm tracks release state |
@@ -270,13 +270,13 @@ flowchart TB
 
 **Step 3 (top right):** Box: "Git Repo (Remote)." Arrow from developer to Git, arrow from Git triggering CI.
 
-**Step 4 (right):** Box: "Jenkins CI Pipeline" — build images, push to registry, lint, package, deploy. Show the numbered flow.
+**Step 4 (right):** Box: "CI/CD Pipeline" — build images, push to registry, lint, package, deploy. Show the numbered flow.
 
 **Step 5 (bottom):** Two boxes: "Dev Cluster" → "Test Cluster." CI deploys to Dev, test passes, promote to Test.
 
 **Step 6:** Draw arrows showing how Helm Charts connect to EVERYTHING — developers use them, CI packages them, clusters run them.
 
-Say: "Helm Charts are the center of everything now. One chart per service, shared library for common patterns, values.yaml per environment. Developer pushes, Jenkins builds and deploys automatically. Rollback is one command. Release prep went from hours to minutes — forty percent reduction."
+Say: "Helm Charts are the center of everything now. One chart per service, shared library for common patterns, values.yaml per environment. Developer pushes, pipeline builds and deploys automatically. Rollback is one command. Release prep went from hours to minutes — forty percent reduction."
 
 ---
 
@@ -302,7 +302,7 @@ flowchart TB
     end
 
     subgraph OpenShift_CI_CD["OpenShift CI/CD"]
-        C1["BuildConfig<br/>(replaces Jenkins image builds)"]:::openshift
+        C1["BuildConfig<br/>(native image builds)"]:::openshift
         C2["ImageStream<br/>(built-in image management)"]:::openshift
         C3["Helm lint"]:::helm
         C4["Helm package"]:::helm
@@ -353,9 +353,9 @@ flowchart TB
 
 ### What Changed from K8s/Helm to OpenShift
 
-| K8s + Helm + Jenkins | OpenShift |
-|---------------------|-----------|
-| Jenkins builds images | OpenShift BuildConfig builds natively |
+| K8s + Helm | OpenShift |
+|------------|-----------|
+| Separate CI for image builds | OpenShift BuildConfig builds natively |
 | Manual image registry | ImageStream manages images + promotion |
 | Namespaces + manual RBAC | Projects (namespace + RBAC built-in) |
 | kubectl | oc CLI (wraps kubectl + OpenShift features) |
@@ -364,7 +364,7 @@ flowchart TB
 
 ### How to Explain to Andy
 
-"After the Helm migration was stable, I designed and started implementing the next step — moving from vanilla Kubernetes to OpenShift. The Helm charts carried over — same charts, just deployed to OpenShift instead of vanilla K8s. The big wins were: BuildConfig replaced Jenkins for image builds, so the build pipeline was native to the platform. ImageStreams gave us built-in image promotion — no more manually pushing tags between registries. And Projects gave us namespace-level RBAC out of the box, which mattered for our multi-team setup with six hundred users."
+"After the Helm migration was stable, I designed and started implementing the next step — moving from vanilla Kubernetes to OpenShift. The Helm charts carried over — same charts, just deployed to OpenShift instead of vanilla K8s. The big wins were: BuildConfig gave us native image builds inside the platform — no separate CI needed for image creation. ImageStreams gave us built-in image promotion — no more manually pushing tags between registries. And Projects gave us namespace-level RBAC out of the box, which mattered for our multi-team setup with six hundred users."
 
 ### If Andy Asks: "Did you finish the OpenShift migration?"
 

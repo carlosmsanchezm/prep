@@ -50,12 +50,12 @@ Say: "This is what I inherited. A single Git repo, per-service configs and templ
 Draw a clean, simple flow:
 
 ```
-[Git Repo] → [Helm Charts] → [Jenkins CI Pipeline] → [Registry] → [Dev Cluster] → [Test Cluster]
-              values.yaml      build → lint → test      versioned     auto-deploy     promote
-              per environment  → package → deploy       images
+[Git Repo] → [Helm Charts] → [CI/CD Pipeline] → [Registry] → [Dev Cluster] → [Test Cluster]
+              values.yaml      build → lint →      versioned     auto-deploy     promote
+              per environment  test → package      images
 ```
 
-Say: "Here's where I took them. Helm charts for all nine services — declarative, versioned, rollbackable. Jenkins pipeline handles build, lint, package, deploy, test — all automated. Each environment gets its own values.yaml — no more Gomplate. One command deploys, one command rolls back. Cut release prep forty percent. The platform went from five layers of manual scripting to a single Helm upgrade command."
+Say: "Here's where I took them. Helm charts for all nine services — declarative, versioned, rollbackable. CI/CD pipeline handles build, lint, package, deploy, and test — all automated on push. Each environment gets its own values.yaml — no more Gomplate. One command deploys, one command rolls back. Cut release prep forty percent. The platform went from five layers of manual scripting to a single Helm upgrade command."
 
 **Step 3 — Draw the migration plan (side or separate area):**
 
@@ -158,11 +158,11 @@ Gomplate is a command-line template engine — like Jinja2 or Helm's Go template
 Both. The Git repo lives on a remote server (Bitbucket — they used their own Bitbucket instance for source control). But the config layer (running Gomplate, running make) happens on a developer's local machine OR on a shared build server. There was no proper CI/CD for the Compose/Swarm setup — it was manually triggered.
 
 **Q: Where is staging? Production?**
-This is part of the problem you inherited. The before-state had:
-- **Local dev:** Developer runs `make` on their laptop → Gomplate generates configs → `docker-compose up` runs services locally
-- **"Production" (the deployed environment):** Someone runs `make deploy` from a build server → scripts call `docker stack deploy` → Swarm runs the services on shared infrastructure
-- **No real staging/testing environment.** That was one of the pain points — you tested on your laptop, then deployed straight to the shared environment.
-- **After your Helm migration:** you added proper dev and test K8s clusters with a Jenkins pipeline handling promotion between them.
+The before-state had minimal environment separation:
+- **Local dev:** Developer runs `make` on their laptop → Gomplate generates configs → `docker-compose up` runs services locally for testing
+- **Shared dev/test instance:** There was a shared environment where services ran for integration testing and validation — but it wasn't a formal staging environment with its own promotion process. It was more like "deploy here, check if it works, then push the same thing to the main deployment."
+- **"Production" (the deployed environment):** The live instance that six hundred engineers used daily. Someone runs `make deploy` from a build server → scripts call `docker stack deploy` → Swarm runs the services on shared infrastructure.
+- **The gap:** No formal promotion path — no "deploy to staging, validate, promote to prod" pipeline. The shared instance served double duty as both test and production in practice. That's one of the major things the Helm migration fixed — proper dev and test K8s clusters with a CI/CD pipeline handling promotion between them.
 
 **Q: This was for DoD / TRMC — was this production?**
 Yes. These nine services (Jira, Bitbucket, Jenkins, etc.) were the development infrastructure for the entire TENA program — six hundred engineers used them daily to write, build, and test code. It wasn't a customer-facing app, but it was production in the sense that if Jira went down, six hundred people couldn't file issues. If Jenkins went down, builds stopped. If Bitbucket went down, nobody could push code. Mission-critical internal tooling.
@@ -184,7 +184,7 @@ Because that's how it was designed — `make` was the single entry point for EVE
 - Both were called BY the Makefiles, not directly by developers. The chain: `make deploy-jira` → calls `scripts/deploy-jira.sh` → runs `docker-compose -f jira/docker-compose.yml up -d`
 
 **Q: Was the build triggered by CI/CD or manual?**
-**Manual for the Swarm deployment.** A developer or ops person would SSH to the build server, pull the latest code, and run `make deploy`. There was no CI/CD pipeline for the Compose/Swarm setup — that was one of the major problems. After the Helm migration, Jenkins CI handled everything automatically on git push.
+**Manual for the Swarm deployment.** A developer or ops person would SSH to the build server, pull the latest code, and run `make deploy`. There was no CI/CD pipeline for the Compose/Swarm setup — that was one of the major problems. After the Helm migration, I set up a CI/CD pipeline that automated everything on git push.
 
 ### The Container Runtime — Docker Swarm
 
@@ -204,12 +204,15 @@ Interesting question — if Andy asks this: "Nix solves a different problem. Mak
 ### Production and CI/CD — The Gaps
 
 **Q: Where is CI/CD in the before state?**
-**It didn't exist for deployment.** That's the point. There was a Jenkins instance (one of the 9 services), but it was used by the engineering teams for THEIR builds, not for deploying the dev tool platform itself. The platform deployment was manual: SSH in, git pull, make deploy. No pipeline, no gates, no automated testing.
+**It didn't exist for platform deployment.** There was a Jenkins instance (one of the 9 services), but it was used by the engineering teams for THEIR application builds, not for deploying the dev tool platform itself. We maintained and managed Jenkins for the users, but the platform's own deployment was manual: SSH in, git pull, make deploy. No pipeline for our own infrastructure, no gates, no automated testing of the platform itself.
 
-After the Helm migration, you built the Jenkins CI pipeline that automated: build images → lint charts → package → deploy to dev → test → promote to test cluster. THAT was one of the major improvements.
+After the Helm migration, I set up a CI/CD pipeline that automated: build images → lint charts → package → deploy to dev cluster → test → promote. The specific CI tool isn't what mattered — what mattered was having an automated promotion path that didn't exist before.
+
+**Q: If Andy asks "what CI tool did you use?"**
+"We had access to the CI tooling on the platform — the migration focused on building the pipeline automation itself: build, lint, package, deploy, test, promote. The tool was less important than establishing the process — before, there was no automated deployment at all for the platform infrastructure."
 
 **Q: So what would you say production was?**
-"The before-state had no proper environment separation. There was local dev on laptops and the shared deployment that six hundred users depended on. No staging, no test environment. You tested on your laptop, then deployed straight to the shared infrastructure. One of the first things I did in the migration was establish proper dev and test K8s clusters — so we had a real promotion path: dev → test → production. That didn't exist before."
+"The before-state had minimal environment separation. There was local dev on laptops, a shared instance for integration testing, and the main deployment that six hundred users depended on. But there was no formal promotion path — no pipeline that gated changes from dev to test to production. The shared instance served double duty. One of the first things I did in the migration was establish proper dev and test K8s clusters with a real CI/CD pipeline — so we had a clean promotion path. That's what brought reliability up to ninety-nine point nine percent."
 
 ---
 
