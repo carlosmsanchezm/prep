@@ -220,6 +220,419 @@ configs:
 5. Operator auto-refreshes when the source changes
 "No secrets in Git. No manual creation. One source of truth in Secrets Manager, automatically synced to the cluster."
 
+### Ansible for RKE2 — Full Playbook Walkthrough
+
+> **Andy asked about this directly.** You need to explain the role structure, walk through the playbook, and answer "how did you bootstrap the nodes?"
+
+**The Ansible project structure:**
+
+```mermaid
+---
+config:
+  theme: dark
+---
+flowchart TD
+    subgraph Ansible_Project["Ansible Project: rke2-bootstrap"]
+        direction TB
+
+        subgraph Inventory["inventory/"]
+            INV_PROD["production.yml<br/>- control_plane group (3 hosts)<br/>- cpu_workers group<br/>- gpu_workers group"]:::inventory
+        end
+
+        subgraph Playbooks["playbooks/"]
+            PB_SITE["site.yml<br/>(master playbook — runs everything)"]:::playbook
+            PB_SERVER["rke2-server.yml<br/>(control plane nodes)"]:::playbook
+            PB_AGENT["rke2-agent.yml<br/>(worker nodes)"]:::playbook
+        end
+
+        subgraph Roles["roles/"]
+            subgraph common["common/ (shared by all nodes)"]
+                COM_TASKS["tasks/main.yml<br/>- disable swap<br/>- load kernel modules<br/>- set sysctl params<br/>- open firewall ports"]:::role
+            end
+
+            subgraph rke2_server["rke2-server/"]
+                SRV_TASKS["tasks/main.yml<br/>- copy rke2 binary<br/>- copy air-gap images<br/>- write config.yaml<br/>- write registries.yaml<br/>- enable + start rke2-server"]:::role
+                SRV_TEMPLATES["templates/<br/>config.yaml.j2<br/>registries.yaml.j2"]:::template
+                SRV_DEFAULTS["defaults/main.yml<br/>rke2_version, token,<br/>server_url, cni"]:::defaults
+                SRV_HANDLERS["handlers/main.yml<br/>restart rke2-server"]:::handler
+            end
+
+            subgraph rke2_agent["rke2-agent/"]
+                AGT_TASKS["tasks/main.yml<br/>- copy rke2 binary<br/>- copy air-gap images<br/>- write config.yaml<br/>- write registries.yaml<br/>- enable + start rke2-agent"]:::role
+                AGT_TEMPLATES["templates/<br/>config.yaml.j2<br/>registries.yaml.j2"]:::template
+                AGT_HANDLERS["handlers/main.yml<br/>restart rke2-agent"]:::handler
+            end
+        end
+
+        subgraph Files["files/ (transferred to nodes)"]
+            RKE2_BIN["rke2.linux-amd64<br/>(binary)"]:::file
+            RKE2_IMAGES["rke2-images.linux-amd64.tar.zst<br/>(air-gap images)"]:::file
+        end
+    end
+
+    PB_SITE -- "includes" --> PB_SERVER
+    PB_SITE -- "includes" --> PB_AGENT
+    PB_SERVER -- "applies roles" --> common
+    PB_SERVER -- "applies roles" --> rke2_server
+    PB_AGENT -- "applies roles" --> common
+    PB_AGENT -- "applies roles" --> rke2_agent
+    rke2_server -- "copies from" --> Files
+    rke2_agent -- "copies from" --> Files
+    PB_SITE -- "reads hosts from" --> Inventory
+
+    classDef inventory fill:#fff3cd,stroke:#856404,stroke-width:2px
+    classDef playbook fill:#cce5ff,stroke:#004085,stroke-width:2px
+    classDef role fill:#f8d7da,stroke:#721c24,stroke-width:2px
+    classDef template fill:#d4edda,stroke:#155724,stroke-width:2px
+    classDef defaults fill:#e2e3e5,stroke:#383d41,stroke-width:2px
+    classDef handler fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    classDef file fill:#e8eaf6,stroke:#283593,stroke-width:2px
+```
+
+**How to explain the structure to Andy:**
+"Three roles. The `common` role runs on ALL nodes — disables swap, loads kernel modules, sets sysctl params, opens firewall ports. The `rke2-server` role runs on control plane nodes — copies the binary, copies air-gap images, writes config.yaml and registries.yaml from templates, starts the rke2-server service. The `rke2-agent` role is the same for workers but starts rke2-agent instead. The inventory groups the hosts: three control plane, CPU workers, GPU workers. The master playbook runs common first on all nodes, then server on the control plane group, then agent on the worker group."
+
+**The inventory file — how Ansible knows which nodes to configure:**
+
+```yaml
+# inventory/production.yml
+all:
+  children:
+    # Control plane — 3 nodes for HA (etcd quorum)
+    control_plane:
+      hosts:
+        cp-1:
+          ansible_host: 10.0.1.10    # private IP in VPC
+        cp-2:
+          ansible_host: 10.0.1.11
+        cp-3:
+          ansible_host: 10.0.1.12
+      vars:
+        rke2_type: server             # runs rke2-server
+
+    # CPU worker nodes
+    cpu_workers:
+      hosts:
+        cpu-1:
+          ansible_host: 10.0.2.10
+      vars:
+        rke2_type: agent              # runs rke2-agent
+        node_labels: "workload=general"
+
+    # GPU worker nodes
+    gpu_workers:
+      hosts:
+        gpu-1:
+          ansible_host: 10.0.3.10
+      vars:
+        rke2_type: agent
+        node_labels: "workload=gpu,nvidia.com/gpu=true"
+
+  # Variables shared by ALL nodes
+  vars:
+    rke2_version: "v1.28.4+rke2r1"
+    rke2_token: "{{ vault_rke2_token }}"         # from Ansible Vault
+    rke2_server_url: "https://10.0.1.10:9345"    # first server node
+    registry_endpoint: "https://account-id.dkr.ecr.us-east-1.amazonaws.com"
+    ansible_user: ec2-user
+    ansible_ssh_private_key_file: ~/.ssh/rke2-key
+```
+
+**What to understand here:**
+- `children` groups nodes by role: control_plane, cpu_workers, gpu_workers
+- `vars` at each level set per-group variables (rke2_type, node_labels)
+- `all.vars` sets cluster-wide variables (version, token, server URL, registry)
+- `vault_rke2_token` comes from Ansible Vault — encrypted, not plain text
+- Ansible SSHs to each host using the private key — agentless, no software to pre-install
+
+**The common role — what ALL nodes need (fully commented):**
+
+```yaml
+# roles/common/tasks/main.yml
+# This role prepares ANY node (server or agent) for RKE2
+
+---
+# SWAP: K8s requires swap disabled — kubelet won't start with swap on
+- name: Disable swap immediately
+  command: swapoff -a
+  changed_when: false        # don't mark as "changed" since this is idempotent
+
+# Remove swap from fstab so it stays off after reboot
+- name: Remove swap from fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '.*swap.*'       # match any line containing "swap"
+    state: absent            # delete it
+
+# KERNEL MODULES: K8s networking needs these — bridge traffic must pass through iptables
+- name: Load required kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - br_netfilter           # enables bridge traffic to be processed by iptables
+    - overlay                # needed for container filesystem layering
+
+# Make modules persist across reboot
+- name: Persist kernel modules
+  copy:
+    content: |
+      br_netfilter
+      overlay
+    dest: /etc/modules-load.d/rke2.conf
+    mode: '0644'
+
+# SYSCTL: Network params required by K8s — allows pod traffic to flow through iptables rules
+- name: Set kernel network parameters
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-rke2.conf    # persist to a dedicated file
+    reload: yes                                  # apply immediately
+  loop:
+    - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }   # bridge IPv4 → iptables
+    - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }  # bridge IPv6 → iptables
+    - { key: 'net.ipv4.ip_forward', value: '1' }                  # allow IP forwarding between interfaces
+
+# FIREWALL: Open ports that RKE2 needs for cluster communication
+- name: Open RKE2 TCP ports
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes           # survives reboot
+    immediate: yes           # applies now without reload
+    state: enabled
+  loop:
+    - 6443                   # K8s API server — kubectl and pods talk to this
+    - 9345                   # RKE2 supervisor — how agents join the cluster
+    - 10250                  # kubelet — API server reads pod metrics from this
+    - 2379                   # etcd client — only needed on server nodes but safe to open
+    - 2380                   # etcd peer — server-to-server etcd replication
+
+# VXLAN port for Canal CNI overlay networking between nodes
+- name: Open VXLAN UDP port
+  firewalld:
+    port: 8472/udp           # Canal/Flannel VXLAN — pod-to-pod traffic across nodes
+    permanent: yes
+    immediate: yes
+    state: enabled
+```
+
+**The rke2-server role — control plane nodes (fully commented):**
+
+```yaml
+# roles/rke2-server/tasks/main.yml
+# This role installs and starts RKE2 in SERVER mode (control plane)
+
+---
+# BINARY: Copy the RKE2 binary — downloaded on connected side, transferred air-gap
+- name: Copy RKE2 binary to node
+  copy:
+    src: files/rke2.linux-amd64          # from our local files/ directory
+    dest: /usr/local/bin/rke2            # standard install location
+    mode: '0755'                         # must be executable
+    owner: root
+
+# AIR-GAP IMAGES: Pre-load container images so RKE2 doesn't try to pull from internet
+- name: Create images directory
+  file:
+    path: /var/lib/rancher/rke2/agent/images
+    state: directory
+    mode: '0755'
+
+- name: Copy air-gap images tarball
+  copy:
+    src: files/rke2-images.linux-amd64.tar.zst    # all K8s system images bundled
+    dest: /var/lib/rancher/rke2/agent/images/      # RKE2 loads these at startup
+    mode: '0644'
+
+# CONFIG: Create the RKE2 config directory
+- name: Create RKE2 config directory
+  file:
+    path: /etc/rancher/rke2
+    state: directory
+    mode: '0755'
+
+# CONFIG.YAML: Tells RKE2 how to run — token, TLS SANs, node labels
+- name: Write RKE2 server config
+  template:
+    src: config.yaml.j2                  # Jinja2 template — variables substituted per node
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'                         # restricted — contains the cluster token
+    owner: root
+  notify: restart rke2-server            # if config changes, restart the service
+
+# REGISTRIES.YAML: Redirect all image pulls to our ECR (air-gap)
+- name: Write registries config
+  template:
+    src: registries.yaml.j2
+    dest: /etc/rancher/rke2/registries.yaml
+    mode: '0600'
+  notify: restart rke2-server
+
+# SYSTEMD: Install the RKE2 server systemd unit file
+- name: Install RKE2 server service
+  command: /usr/local/bin/rke2 server --install
+  args:
+    creates: /etc/systemd/system/rke2-server.service   # skip if already installed
+  register: rke2_install
+
+# START: Enable and start the service
+- name: Enable and start RKE2 server
+  systemd:
+    name: rke2-server
+    state: started
+    enabled: yes                         # start on boot
+    daemon_reload: yes                   # reload systemd to pick up new unit file
+
+# WAIT: Give the API server time to come up before proceeding
+- name: Wait for API server to be ready
+  command: /var/lib/rancher/rke2/bin/kubectl get nodes
+  register: kubectl_result
+  retries: 30                            # try for up to 5 minutes
+  delay: 10                              # wait 10 seconds between retries
+  until: kubectl_result.rc == 0          # succeed when kubectl works
+  changed_when: false
+  when: rke2_install.changed             # only wait on fresh install
+```
+
+**The config.yaml.j2 template — what gets rendered per node:**
+
+```yaml
+# templates/config.yaml.j2
+# RKE2 server configuration — rendered by Ansible per node
+
+{% if rke2_type == 'server' %}
+# First server bootstraps the cluster; others join via server URL
+{% if inventory_hostname == groups['control_plane'][0] %}
+# FIRST SERVER: bootstraps cluster, no server URL needed
+cluster-init: true
+{% else %}
+# JOINING SERVER: connects to first server to join etcd cluster
+server: {{ rke2_server_url }}
+{% endif %}
+{% endif %}
+
+# Shared token — all nodes use this to authenticate when joining
+token: {{ rke2_token }}
+
+# TLS SANs: additional hostnames/IPs that the API server cert is valid for
+# Needed so kubectl works from the NLB IP and from other nodes
+tls-san:
+  - {{ ansible_host }}
+  - {{ rke2_server_url | regex_replace('https://|:9345', '') }}
+
+# Node labels — used by schedulers to place workloads on the right nodes
+node-label:
+{% if node_labels is defined %}
+{% for label in node_labels.split(',') %}
+  - {{ label }}
+{% endfor %}
+{% endif %}
+
+# CIS hardening profile — hardens K8s to CIS benchmark
+profile: cis-1.23
+
+# Disable servicelb — we use NLB, not RKE2's built-in load balancer
+disable:
+  - rke2-ingress-nginx      # we use Istio for ingress instead
+```
+
+**The registries.yaml.j2 template:**
+
+```yaml
+# templates/registries.yaml.j2
+# Tells containerd to redirect image pulls to our ECR (air-gap)
+
+mirrors:
+  # When something requests docker.io images, pull from ECR instead
+  docker.io:
+    endpoint:
+      - "{{ registry_endpoint }}"
+  # Same for GitHub container registry
+  ghcr.io:
+    endpoint:
+      - "{{ registry_endpoint }}"
+  # Same for Rancher's own registry
+  "docker.rancher.io":
+    endpoint:
+      - "{{ registry_endpoint }}"
+
+configs:
+  "{{ registry_endpoint }}":
+    # ECR auth is handled by the node's IAM instance profile
+    # No username/password needed — the node's role has ecr:GetAuthorizationToken
+```
+
+**The rke2-agent role (worker nodes) — same structure, key difference:**
+
+```yaml
+# roles/rke2-agent/tasks/main.yml
+# Same as rke2-server EXCEPT:
+# - Starts rke2-agent instead of rke2-server
+# - config.yaml has server URL (joins the cluster, doesn't bootstrap)
+# - No cluster-init, no etcd
+
+# ... (copy binary, copy images, write config, write registries — same tasks)
+
+- name: Enable and start RKE2 agent
+  systemd:
+    name: rke2-agent          # agent, not server
+    state: started
+    enabled: yes
+    daemon_reload: yes
+```
+
+**The agent's config.yaml.j2 is simpler:**
+```yaml
+# Agent config — just needs to know where the server is and the token
+server: {{ rke2_server_url }}
+token: {{ rke2_token }}
+node-label:
+{% if node_labels is defined %}
+{% for label in node_labels.split(',') %}
+  - {{ label }}
+{% endfor %}
+{% endif %}
+```
+
+**The master playbook — site.yml (ties it all together):**
+
+```yaml
+# playbooks/site.yml
+# Master playbook — run this to bootstrap the entire cluster
+
+---
+# Step 1: Prepare ALL nodes (swap, kernel, firewall)
+- name: Prepare all nodes for RKE2
+  hosts: all
+  become: true
+  roles:
+    - common
+
+# Step 2: Bootstrap control plane (servers)
+# serial: 1 means one server at a time — etcd needs ordered startup
+- name: Bootstrap RKE2 control plane
+  hosts: control_plane
+  become: true
+  serial: 1                    # ONE AT A TIME — first node bootstraps, others join
+  roles:
+    - rke2-server
+
+# Step 3: Join worker nodes (agents)
+# These can all join in parallel — they just register with the API server
+- name: Join RKE2 worker nodes
+  hosts: cpu_workers:gpu_workers    # both CPU and GPU groups
+  become: true
+  roles:
+    - rke2-agent
+```
+
+**Why `serial: 1` for control plane?**
+"The first control plane node bootstraps the cluster — it creates etcd, generates certificates, starts the API server. The second and third nodes JOIN the existing cluster via the server URL on port 9345. If you start all three simultaneously, they'd all try to bootstrap independently and you'd get three separate clusters. Serial execution ensures: first node bootstraps, second joins, third joins. Etcd quorum forms at three."
+
+**How to explain the full Ansible flow to Andy:**
+"I run `ansible-playbook -i inventory/production.yml playbooks/site.yml`. Ansible SSHs to every host in parallel, runs the common role — disables swap, loads kernel modules, sets network params, opens firewall ports. Then it hits the control plane nodes ONE AT A TIME — first node bootstraps the cluster with embedded etcd, second and third join via port 9345. Each gets the RKE2 binary, air-gap images, config.yaml with the token and CIS profile, and registries.yaml pointing to ECR. Then workers join in parallel — same binary, same images, but rke2-agent instead of rke2-server. Five minutes later: three-node HA control plane, CPU workers, GPU workers, all registered. ArgoCD deploys everything else from Git."
+
 ### Tradeoffs to Know
 
 **"Why RKE2 over EKS?"**
