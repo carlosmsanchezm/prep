@@ -463,6 +463,81 @@ CNI = Container Network Interface. K8s doesn't provide networking itself — it 
 **How to explain to Andy:**
 "K8s doesn't handle networking itself — it delegates to a CNI plugin. On the Nightwatch RKE2 cluster, we used Canal — Flannel for VXLAN overlay networking between nodes, Calico for NetworkPolicy enforcement. On VivSoft's EKS, it was the VPC CNI — pods get real VPC IPs, no overlay. The choice depends on environment: cloud gets native CNI, on-prem gets overlay because the underlying network usually doesn't support BGP routing for pod CIDRs."
 
+### Deployment vs StatefulSet — When to Use Which
+
+**Deployment:** For stateless apps — the container can restart, move nodes, scale up/down freely. Every pod is identical and interchangeable. Gets random names like `jira-7f8d9-xk2p`.
+
+**StatefulSet:** For stateful workloads — each pod gets a stable hostname (`postgres-0`, `postgres-1`), its own PVC that follows it across restarts, and ordered startup/shutdown. Used for databases, message queues, anything that needs identity and dedicated storage.
+
+**For the IBM migration:**
+
+| Service | Type | Why |
+|---------|------|-----|
+| Jira, Confluence, Bitbucket (apps) | **Deployment** + external database | The apps are stateless — they connect to PostgreSQL for data. The app container can restart freely. |
+| PostgreSQL (backing each app) | **StatefulSet** | The database needs stable identity, its own PVC per replica, ordered startup. Can't have a database pod restart with a random name and lose its volume binding. |
+| Jenkins | **Deployment** + PVC | Single instance, semi-stateful (pipeline configs in a PVC), but doesn't need StatefulSet's multi-replica ordering. |
+| Artifactory | **Deployment** + PVC | Single instance with PVC for artifacts. |
+| Crowd, Accounts-API, Mailman, HTTPD | **Deployment** | Fully stateless — no persistent data of their own. |
+
+**The pattern:** Applications are Deployments. Databases are StatefulSets. Apps CONNECT to databases — they don't store data themselves. This is the standard K8s pattern for any service with a database backend.
+
+**How to explain to Andy:**
+"I used Deployments for the application services — Jira, Bitbucket, Confluence — because they're stateless. They connect to external PostgreSQL instances for their data. The databases themselves were StatefulSets — each Postgres replica gets its own PVC, stable hostname, and ordered startup. This separates the stateless app layer from the stateful data layer. The app can restart, scale, roll back freely without touching the database."
+
+### Helm Rollback — How It Works
+
+**What happens when you run `helm rollback jira 3`:**
+1. Helm looks up revision 3 in its release history (stored as K8s Secrets in the cluster)
+2. It re-applies the exact manifests from revision 3 — same Deployment, Service, ConfigMap, PVC
+3. K8s sees the "new" desired state (which is actually the old one) and reconciles — pods roll back to the previous image, configs revert
+4. Takes seconds, not hours
+
+**Every `helm upgrade` creates a new revision:** revision 1 = initial install, revision 2 = first upgrade, etc. You can roll back to ANY revision number, not just the previous one.
+
+**Can you automate rollback?**
+Yes — in a CI/CD pipeline: "deploy → run health checks → if checks fail within 5 minutes, automatically run `helm rollback`." But at IBM, with 9 internal tools and 2-week releases, rollback was manual: deploy, verify, if bad → one command. The point isn't automation — it's that rollback EXISTS as a single command, versus the before-state where rollback meant finding a Git commit, reverting, re-running make, and hoping.
+
+### CI/CD Pipeline — What Was Actually In It
+
+For IBM, the pipeline was functional validation — not the full security-scanning pipeline from VivSoft/DoD:
+
+| Stage | Tool | What it does |
+|-------|------|-------------|
+| Build | `docker build` | Build container image from Dockerfile |
+| Push | `docker push` to Artifactory | Store versioned image in our registry (Artifactory doubled as container registry) |
+| Lint | `helm lint` | Validate chart syntax — catches YAML errors, missing values, bad templates |
+| Template | `helm template` | Dry-run render — generates the actual K8s YAML without deploying. Catches template logic errors. |
+| Package | `helm package` | Create versioned chart archive (.tgz) — stored in Artifactory as a Helm chart repo |
+| Deploy to Dev | `helm upgrade --install -f values-dev.yaml` | Deploy to dev K8s cluster |
+| Smoke Test | Shell scripts: `curl` health endpoints | Verify each service responds — hit web UI, check HTTP 200 |
+| Promote | `helm upgrade --install -f values-test.yaml` | Deploy to test cluster after dev passes |
+
+**No SonarQube, no Trivy, no Kyverno at IBM.** This was internal tooling, not a DoD production system with compliance mandates. Security scanning came at later roles:
+- **VivSoft:** Trivy (CVE scan), Kyverno (admission policy — blocks non-Iron Bank images), OSCAP (STIG compliance)
+- **NTConcepts:** Trivy + SonarQube in CI pipeline, OPA policies on Terraform plans
+
+**If Andy asks about security in the pipeline:**
+"For the IBM platform, the pipeline focused on functional validation — lint, template, deploy, smoke test. It was internal dev tooling, not a customer-facing or compliance-driven system. Security scanning like Trivy, SonarQube, and admission policies like Kyverno are things I brought in at VivSoft and NTConcepts where DoD compliance mandated it. If I were building this pipeline today — or for Anduril — I'd add image scanning and policy enforcement from the start."
+
+### Developer Connection to Dev/Test Environments
+
+**Local development:** Developer runs Docker Desktop or Minikube on their laptop — a single-node K8s cluster locally. They `helm install` their chart locally, test it, debug with `kubectl logs` and `kubectl exec`. This replaces the old `docker-compose up` for local testing.
+
+**Connecting to shared dev/test clusters:** Developers get a kubeconfig file that points their `kubectl` and `helm` commands at the shared cluster's API server. Connection path: laptop → VPN (DoD internal network) → K8s API server on the dev/test cluster. Developers can deploy their chart to the shared dev cluster for integration testing — same `helm install` command, just pointed at a different cluster context.
+
+**How kubeconfig works:**
+```
+# Contexts in kubeconfig:
+- local (Docker Desktop / Minikube) — for local dev
+- dev-cluster — for shared dev environment
+- test-cluster — for test environment
+- prod-cluster — for production (restricted access)
+
+# Switch context:
+kubectl config use-context dev-cluster
+helm upgrade jira ./jira-chart -f values-dev.yaml
+```
+
 ### What Does "Runtime" Mean?
 
 **Three phases to understand:**

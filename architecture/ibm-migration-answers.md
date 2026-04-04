@@ -177,12 +177,18 @@ config:
   theme: dark
 ---
 flowchart TD
+    subgraph Dev_Local["Developer Local Environment"]
+        LOCAL_GIT["Local Git clone"]:::git
+        DOCKER_DESKTOP["Docker Desktop / Minikube<br/>(local K8s cluster)"]:::k8s
+        LOCAL_HELM["Helm CLI<br/>helm lint · helm template<br/>helm install (local test)"]:::helm
+        LOCAL_KUBECTL["kubectl<br/>(debugging, logs, exec)"]:::k8s
+    end
+
     subgraph Dev_Config_Layer["Development & Configuration Layer"]
-        GIT_AFTER["Git Repo<br/>(Bitbucket — same repo)"]:::git
+        GIT_AFTER["Git Repo<br/>(Bitbucket — remote)"]:::git
         HELM_CHARTS["Helm Charts<br/>(one chart per service)"]:::helm
         SHARED_LIB["Shared Library Chart<br/>common templates:<br/>health checks, resource limits,<br/>labels, probe defaults"]:::helm
         VALUES["values.yaml files<br/>values-dev.yaml<br/>values-test.yaml<br/>values-prod.yaml"]:::values
-        HELM_CLI["Helm CLI<br/>helm lint (validate)<br/>helm template (dry-run)<br/>helm install/upgrade (deploy)"]:::helm
     end
 
     subgraph Build_Deploy_Layer["Build & Deployment Layer"]
@@ -228,11 +234,18 @@ flowchart TD
         PROD_CLUSTER["Production<br/>helm upgrade with<br/>values-prod.yaml"]:::k8s
     end
 
+    %% Developer local workflow
+    LOCAL_GIT -- "1 clone/pull" --> GIT_AFTER
+    LOCAL_GIT -- "2 modify charts" --> HELM_CHARTS
+    LOCAL_HELM -- "3 lint + template" --> HELM_CHARTS
+    LOCAL_HELM -- "4 install locally" --> DOCKER_DESKTOP
+    LOCAL_KUBECTL -- "5 debug locally" --> DOCKER_DESKTOP
+    LOCAL_GIT -- "6 commit + push" --> GIT_AFTER
+
     %% Dev & Config layer relationships
     GIT_AFTER -- "stores" --> HELM_CHARTS
     HELM_CHARTS -- "inherits from" --> SHARED_LIB
     HELM_CHARTS -- "uses" --> VALUES
-    HELM_CLI -- "validates" --> HELM_CHARTS
     VALUES -- "per-environment<br/>overrides" --> HELM_CHARTS
 
     %% Build & Deploy layer relationships
