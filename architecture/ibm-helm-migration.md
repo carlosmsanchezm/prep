@@ -51,35 +51,97 @@ This step has two pieces. First draw what each service BECAME in K8s (the archit
 
 **Step 2a — The K8s Architecture (what each service looks like):**
 
-Draw a box labeled "K8s Cluster" and inside it, show one service as an example (Jira):
+Draw the K8s architecture showing what each service became — use Jira as the detailed example:
 
-```
-┌─── K8s Cluster ──────────────────────────────────────────────────────┐
-│                                                                       │
-│  ┌── Jira (example — same pattern for all 9 services) ───────────┐   │
-│  │                                                                │   │
-│  │  [Deployment]          [Service]           [ConfigMap]          │   │
-│  │  - image: jira:8.x     - ClusterIP        - DB_HOST: postgres  │   │
-│  │  - replicas: 1         - port 8080         - MEMORY: 4g        │   │
-│  │  - resource limits     - selector: app=jira - FEATURE_FLAGS     │   │
-│  │  - health checks                                                │   │
-│  │     liveness: /healthz                     [Secret]             │   │
-│  │     readiness: /ready                      - DB_PASSWORD        │   │
-│  │                                            - LICENSE_KEY        │   │
-│  │  [PersistentVolumeClaim]                                        │   │
-│  │  - 50Gi for Jira data                                           │   │
-│  │  - StorageClass: standard                                       │   │
-│  │                                                                 │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                       │
-│  Same pattern x9: Bitbucket, Confluence, Jenkins, Artifactory,       │
-│                    Crowd, Accounts-API, Mailman, HTTPD-UI             │
-│                                                                       │
-│  [Shared Library Chart]                                               │
-│  - Common templates: health checks, resource limits, labels          │
-│  - Every service chart inherits from this                            │
-│                                                                       │
-└───────────────────────────────────────────────────────────────────────┘
+```mermaid
+---
+config:
+  layout: elk
+  theme: dark
+---
+flowchart TB
+    subgraph K8s_Cluster["Kubernetes Cluster"]
+        direction TB
+
+        subgraph Jira_Service["Jira (example — same pattern for all 9 services)"]
+            direction TB
+
+            subgraph Jira_Workload["Workload"]
+                JIRA_DEPLOY["Deployment: jira<br/>image: jira:8.x<br/>replicas: 1<br/>resources:<br/>  requests: cpu=500m, mem=2Gi<br/>  limits: cpu=2, mem=4Gi"]:::k8s
+                JIRA_LIVENESS["livenessProbe<br/>httpGet /healthz<br/>periodSeconds: 15"]:::probe
+                JIRA_READINESS["readinessProbe<br/>httpGet /ready<br/>initialDelaySeconds: 30"]:::probe
+            end
+
+            subgraph Jira_Networking["Networking"]
+                JIRA_SVC["Service: jira-svc<br/>type: ClusterIP<br/>port: 80 → targetPort: 8080<br/>selector: app=jira"]:::network
+            end
+
+            subgraph Jira_Config["Configuration"]
+                JIRA_CM["ConfigMap: jira-config<br/>DB_HOST: postgres-jira<br/>JIRA_PORT: 8080<br/>MEMORY_OPTS: -Xmx4g<br/>FEATURE_FLAGS: ..."]:::config
+                JIRA_SECRET["Secret: jira-secrets<br/>DB_PASSWORD: (base64)<br/>LICENSE_KEY: (base64)<br/>SMTP_PASSWORD: (base64)"]:::secret
+            end
+
+            subgraph Jira_Storage["Persistent Storage"]
+                JIRA_PVC["PersistentVolumeClaim: jira-data<br/>storageClassName: standard<br/>accessModes: ReadWriteOnce<br/>storage: 50Gi<br/>reclaimPolicy: Retain"]:::storage
+                JIRA_PV["PersistentVolume<br/>bound to jira-data PVC<br/>hostPath or NFS or EBS"]:::storage
+            end
+        end
+
+        subgraph Other_Services["Other 8 Services (same pattern)"]
+            direction LR
+            BB_DEPLOY["Bitbucket<br/>Deployment + Service<br/>+ PVC (100Gi repos)"]:::k8s
+            CONF_DEPLOY["Confluence<br/>Deployment + Service<br/>+ PVC (50Gi)"]:::k8s
+            JENK_DEPLOY["Jenkins<br/>Deployment + Service<br/>+ PVC (pipelines)"]:::k8s
+            ART_DEPLOY["Artifactory<br/>Deployment + Service<br/>+ PVC (artifacts)"]:::k8s
+            CROWD_DEPLOY["Crowd (SSO)<br/>Deployment + Service"]:::k8s
+            ACCT_DEPLOY["Accounts-API<br/>Deployment + Service"]:::k8s
+            MAIL_DEPLOY["Mailman<br/>Deployment + Service"]:::k8s
+            HTTPD_DEPLOY["HTTPD-UI<br/>Deployment + Service"]:::k8s
+        end
+
+        subgraph Shared_Library["Shared Helm Library Chart"]
+            LIB_HEALTH["Common health check<br/>templates"]:::helm
+            LIB_RESOURCES["Common resource limit<br/>templates"]:::helm
+            LIB_LABELS["Standard labels:<br/>app, version, env,<br/>managed-by: helm"]:::helm
+            LIB_PROBES["Probe defaults:<br/>liveness, readiness<br/>timeouts, thresholds"]:::helm
+        end
+
+        subgraph Helm_Values["values.yaml (per environment)"]
+            VAL_DEV["values-dev.yaml<br/>replicas: 1<br/>resources: small<br/>DB_HOST: dev-postgres"]:::values
+            VAL_TEST["values-test.yaml<br/>replicas: 1<br/>resources: medium<br/>DB_HOST: test-postgres"]:::values
+            VAL_PROD["values-prod.yaml<br/>replicas: 2<br/>resources: large<br/>DB_HOST: prod-postgres"]:::values
+        end
+    end
+
+    %% Relationships within Jira service
+    JIRA_DEPLOY -- "exposes" --> JIRA_LIVENESS
+    JIRA_DEPLOY -- "exposes" --> JIRA_READINESS
+    JIRA_DEPLOY -- "exposed via" --> JIRA_SVC
+    JIRA_DEPLOY -- "reads config from" --> JIRA_CM
+    JIRA_DEPLOY -- "reads secrets from" --> JIRA_SECRET
+    JIRA_DEPLOY -- "mounts volume" --> JIRA_PVC
+    JIRA_PVC -- "binds to" --> JIRA_PV
+
+    %% Shared library used by all services
+    Shared_Library -. "inherited by all<br/>service charts" .-> Jira_Service
+    Shared_Library -. "inherited by" .-> Other_Services
+
+    %% Values files select environment config
+    Helm_Values -. "overrides per<br/>environment" .-> Jira_Service
+    Helm_Values -. "overrides per<br/>environment" .-> Other_Services
+
+    %% Other services use same database pattern
+    BB_DEPLOY -- "PVC: 100Gi (git repos)" --> JIRA_PV
+    JENK_DEPLOY -- "PVC: pipelines data" --> JIRA_PV
+
+    classDef k8s fill:#9cf,stroke:#333,stroke-width:2px
+    classDef network fill:#cce5ff,stroke:#004085,stroke-width:2px
+    classDef config fill:#fff3cd,stroke:#856404,stroke-width:2px
+    classDef secret fill:#f8d7da,stroke:#721c24,stroke-width:2px
+    classDef storage fill:#d4edda,stroke:#155724,stroke-width:2px
+    classDef probe fill:#e2e3e5,stroke:#383d41,stroke-width:2px
+    classDef helm fill:#fcf,stroke:#333,stroke-width:2px
+    classDef values fill:#ff9,stroke:#333,stroke-width:2px
 ```
 
 Say: "Each service became the same pattern in Kubernetes. Take Jira: a Deployment defines the container image, replicas, resource limits, and health checks — liveness and readiness probes that didn't exist in Swarm. A Service gives it a stable DNS name so other services find it without hardcoded IPs — replaces Compose's depends_on. A ConfigMap holds the non-sensitive config that used to be in Gomplate templates. A Secret holds passwords and license keys — no more plain text in env files. And a PersistentVolumeClaim for data that survives pod restarts — this was the hardest part for stateful services like Jira and Bitbucket.
