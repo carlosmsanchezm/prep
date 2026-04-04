@@ -168,115 +168,175 @@ Write these next to or below the diagram:
 
 ## 3. AFTER State: Helm-Based Deployment
 
-> This diagram shows the relationships — how developers interact with Helm charts, how CI/CD flows through the pipeline, how environments connect. This is what the AFTER state looks like and what you draw on the whiteboard as the contrast to the BEFORE.
+> **Same 4 layers as the BEFORE state** — but clean. Draw this side-by-side or below the BEFORE on the whiteboard so Andy sees the direct comparison: same structure, everything improved.
 
 ```mermaid
 ---
 config:
   layout: elk
+  theme: dark
 ---
-flowchart TB
-    subgraph Developer_Local_Environment["Developer Local Environment"]
-        A1["Local Git repository"]:::git
-        A2["Docker Desktop / Minikube"]:::k8s
-        A3["Helm"]:::helm
-        A4["kubectl"]:::k8s
+flowchart TD
+    subgraph Dev_Config_Layer["Development & Configuration Layer"]
+        GIT_AFTER["Git Repo<br/>(Bitbucket — same repo)"]:::git
+        HELM_CHARTS["Helm Charts<br/>(one chart per service)"]:::helm
+        SHARED_LIB["Shared Library Chart<br/>common templates:<br/>health checks, resource limits,<br/>labels, probe defaults"]:::helm
+        VALUES["values.yaml files<br/>values-dev.yaml<br/>values-test.yaml<br/>values-prod.yaml"]:::values
+        HELM_CLI["Helm CLI<br/>helm lint (validate)<br/>helm template (dry-run)<br/>helm install/upgrade (deploy)"]:::helm
     end
 
-    subgraph Version_Control["Version Control"]
-        B1["Remote Git repository"]:::git
+    subgraph Build_Deploy_Layer["Build & Deployment Layer"]
+        CI_PIPELINE["CI/CD Pipeline<br/>(triggered on git push)"]:::cicd
+        BUILD_IMG["Build Docker images"]:::docker
+        PUSH_REG["Push to Artifactory<br/>(container registry)"]:::docker
+        HELM_LINT["Helm lint + template<br/>(validate charts)"]:::helm
+        HELM_PKG["Helm package<br/>(versioned chart archive)"]:::helm
+        HELM_DEPLOY["helm upgrade --install<br/>(single deploy command)"]:::helm
     end
 
-    subgraph CI_CD_Pipeline["CI/CD Pipeline"]
-        C1["Build Docker images"]:::docker
-        C2["Push to container registry"]:::docker
-        C3["Helm lint"]:::helm
-        C4["Helm package"]:::helm
+    subgraph K8s_Runtime["Kubernetes Cluster (replaces Docker Swarm)"]
+        subgraph Per_Service["Per Service (Jira example — same for all 9)"]
+            DEPLOYMENT["Deployment<br/>image, replicas, resource limits<br/>rolling update strategy"]:::k8s
+            SERVICE["Service (ClusterIP)<br/>stable DNS name<br/>port mapping + selector"]:::k8s
+            CONFIGMAP["ConfigMap<br/>DB_HOST, ports, memory opts<br/>(non-sensitive config)"]:::k8s
+            SECRET["Secret<br/>DB_PASSWORD, LICENSE_KEY<br/>(sensitive, base64)"]:::k8s
+            PVC["PersistentVolumeClaim<br/>storage size, access mode<br/>reclaim policy: Retain"]:::k8s
+            LIVENESS["Liveness Probe<br/>httpGet /healthz<br/>(is it alive?)"]:::probe
+            READINESS["Readiness Probe<br/>httpGet /ready<br/>(ready for traffic?)"]:::probe
+        end
+
+        subgraph All_Services["Dev Tool Suite (9 Services · 600+ Users)"]
+            JIRA_A["Jira"]:::service
+            BB_A["Bitbucket"]:::service
+            CONF_A["Confluence"]:::service
+            JENK_A["Jenkins"]:::service
+            ART_A["Artifactory"]:::service
+            CROWD_A["Crowd"]:::service
+            ACCT_A["Accounts-API"]:::service
+            MAIL_A["Mailman"]:::service
+            HTTPD_A["HTTPD-UI"]:::service
+        end
+
+        subgraph Storage["Persistent Storage"]
+            PV["PersistentVolumes<br/>NFS / local disk<br/>Retain for prod, Delete for test"]:::storage
+        end
     end
 
-    subgraph Dev_Test_Environments["Dev/Test Environments"]
-        D1["Dev Kubernetes Cluster"]:::k8s
-        D2["Test Kubernetes Cluster"]:::k8s
+    subgraph Environments["Environment Promotion"]
+        DEV_CLUSTER["Dev Cluster<br/>auto-deploy on push"]:::k8s
+        TEST_CLUSTER["Test Cluster<br/>promote after dev passes"]:::k8s
+        PROD_CLUSTER["Production<br/>helm upgrade with<br/>values-prod.yaml"]:::k8s
     end
 
-    subgraph Helm_Charts["Helm Charts"]
-        E1["Application charts<br/>(one per service)"]:::helm
-        E2["Shared library charts<br/>(common patterns)"]:::helm
-        E3["values.yaml files<br/>(per environment)"]:::values
-    end
+    %% Dev & Config layer relationships
+    GIT_AFTER -- "stores" --> HELM_CHARTS
+    HELM_CHARTS -- "inherits from" --> SHARED_LIB
+    HELM_CHARTS -- "uses" --> VALUES
+    HELM_CLI -- "validates" --> HELM_CHARTS
+    VALUES -- "per-environment<br/>overrides" --> HELM_CHARTS
 
-    %% Developer workflow (numbered steps)
-    A1 -- "1 Clone/Pull" --> B1
-    A1 -- "2 Modify code/charts" --> Helm_Charts
-    A3 -- "3 helm lint" --> Helm_Charts
-    A3 -- "4 helm template" --> Helm_Charts
-    A3 -- "5 helm install/upgrade" --> A2
-    A4 -- "6 kubectl for debugging" --> A2
-    A1 -- "7 Commit changes" --> A1
-    A1 -- "8 Push changes" --> B1
+    %% Build & Deploy layer relationships
+    GIT_AFTER -- "push triggers" --> CI_PIPELINE
+    CI_PIPELINE -- "1 build" --> BUILD_IMG
+    BUILD_IMG -- "2 push" --> PUSH_REG
+    CI_PIPELINE -- "3 lint" --> HELM_LINT
+    CI_PIPELINE -- "4 package" --> HELM_PKG
+    CI_PIPELINE -- "5 deploy" --> HELM_DEPLOY
 
-    %% CI/CD workflow (numbered steps)
-    B1 -- "1 Trigger CI" --> C1
-    C1 -- "2 Build images" --> C2
-    C2 -- "3 Push images" --> C2
-    C3 -- "4 Lint charts" --> Helm_Charts
-    C4 -- "5 Package charts" --> Helm_Charts
-    C4 -- "6 Deploy to Dev" --> D1
-    D1 -- "7 Run tests" --> D1
-    D1 -- "8 Promote to Test" --> D2
+    %% Deployment to cluster
+    HELM_DEPLOY -- "helm upgrade" --> K8s_Runtime
+    PUSH_REG -- "images pulled by" --> K8s_Runtime
 
-    %% High-level relationships
-    Developer_Local_Environment -- "Develop and test" --> Helm_Charts
-    Helm_Charts -- "Used by" --> CI_CD_Pipeline
-    Helm_Charts -- "Deploy to" --> Dev_Test_Environments
-    B1 -- "Triggers" --> CI_CD_Pipeline
-    CI_CD_Pipeline -- "Deploys to" --> Dev_Test_Environments
+    %% K8s internal relationships
+    DEPLOYMENT -- "exposed via" --> SERVICE
+    DEPLOYMENT -- "reads config" --> CONFIGMAP
+    DEPLOYMENT -- "reads secrets" --> SECRET
+    DEPLOYMENT -- "mounts" --> PVC
+    DEPLOYMENT -- "checks" --> LIVENESS
+    DEPLOYMENT -- "checks" --> READINESS
+    PVC -- "binds to" --> PV
+    Per_Service -- "pattern x9" --> All_Services
+
+    %% Environment promotion
+    HELM_DEPLOY -- "auto-deploy" --> DEV_CLUSTER
+    DEV_CLUSTER -- "tests pass → promote" --> TEST_CLUSTER
+    TEST_CLUSTER -- "validated → promote" --> PROD_CLUSTER
+
+    %% Rollback (key improvement)
+    PROD_CLUSTER -. "helm rollback<br/>(any revision)" .-> HELM_DEPLOY
 
     classDef git fill:#f96,stroke:#333,stroke-width:2px
-    classDef k8s fill:#9cf,stroke:#333,stroke-width:2px
     classDef helm fill:#fcf,stroke:#333,stroke-width:2px
-    classDef docker fill:#cfc,stroke:#333,stroke-width:2px
     classDef values fill:#ff9,stroke:#333,stroke-width:2px
+    classDef cicd fill:#ccccff,stroke:#333,stroke-width:2px
+    classDef docker fill:#cfc,stroke:#333,stroke-width:2px
+    classDef k8s fill:#9cf,stroke:#333,stroke-width:2px
+    classDef probe fill:#e2e3e5,stroke:#383d41,stroke-width:2px
+    classDef service fill:#ccff99,stroke:#333,stroke-width:2px
+    classDef storage fill:#d4edda,stroke:#155724,stroke-width:2px
 ```
 
-### What This Diagram Shows (the story)
+### What This Diagram Shows — Layer by Layer Comparison
 
-**Developer Local Environment:** Developer clones the repo, modifies Helm charts locally, runs `helm lint` and `helm template` to validate, then `helm install` to test on Minikube/Docker Desktop. Uses kubectl for debugging. Commits and pushes.
+**Layer 1 — Development & Configuration (BEFORE vs AFTER):**
 
-**Version Control → CI/CD:** Push triggers the pipeline. Pipeline builds Docker images, pushes to registry, lints Helm charts, packages them, deploys to Dev cluster, runs tests, promotes to Test.
+| Before | After |
+|--------|-------|
+| Gomplate (custom templating) | Helm templates (industry standard Go templating) |
+| Individual config files + values.yaml → Gomplate substitution | values.yaml per environment → Helm renders templates |
+| Template .tmpl files with custom syntax | Helm chart templates with `{{ .Values.x }}` syntax |
+| No shared patterns — each service configured independently | Shared library chart — common patterns inherited by all 9 charts |
 
-**Helm Charts (center):** The key differentiator. Application charts (one per service), shared library charts (common patterns like health checks, resource limits), and values.yaml per environment. Everything is templated, versioned, rollbackable.
+**Layer 2 — Build & Deployment (BEFORE vs AFTER):**
 
-**Dev/Test Environments:** Separate K8s clusters. Dev gets auto-deployed on every push. Test gets promoted after dev tests pass.
+| Before | After |
+|--------|-------|
+| `make` command as single entry point | CI/CD pipeline triggered on git push |
+| Makefiles → Python scripts → Shell scripts → docker commands | Pipeline: build image → push registry → lint chart → package → deploy |
+| 5 layers of indirection, manual execution | 5 automated steps, single trigger |
+| SSH to server, git pull, run make | Push code, pipeline runs automatically |
+| No rollback — find the commit, re-run make | `helm rollback` to any previous revision number |
 
-### Key Improvements vs. BEFORE State
+**Layer 3 — Container Runtime (BEFORE vs AFTER):**
 
-| Before (Compose/Swarm) | After (Helm/K8s) |
-|------------------------|-------------------|
-| Docker Compose + Swarm | Kubernetes + Helm |
-| Gomplate (custom templating) | Helm templates (industry standard) |
-| Makefiles + Python + Shell scripts | CI/CD pipeline |
-| Manual release checklist | Automated: build → lint → test → deploy |
-| No rollback | `helm rollback` to any previous revision |
-| No drift detection | Helm tracks release state |
-| 5 layers of indirection | Push → CI → deploy (3 steps) |
-| Hours per release | Minutes per release (40% reduction) |
+| Before | After |
+|--------|-------|
+| Docker Compose files (service definitions) | K8s Deployments (with replicas, resource limits, rolling updates) |
+| Docker Swarm (basic orchestration, restart on crash) | Kubernetes (health checks, auto-scaling, rolling updates, rollback) |
+| Docker Volumes (no reclaim policy, no backup strategy) | PersistentVolumeClaims with StorageClass, Retain/Delete policies |
+| No health checks — traffic hits containers immediately | Liveness + Readiness probes gate traffic |
+| No resource limits — one container can consume all host resources | Resource requests + limits enforced per container |
+| No service discovery beyond Docker DNS | K8s Services with stable DNS names, ClusterIP load balancing |
+
+**Layer 4 — Services (same 9 services, better foundation):**
+
+Same nine services: Jira, Bitbucket, Confluence, Jenkins, Artifactory, Crowd, Accounts-API, Mailman, HTTPD-UI. Same 600+ users. But now each service has: versioned Helm chart, health checks, resource limits, persistent storage with reclaim policies, and automated deployment via CI/CD.
+
+### Key Improvements Summary
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Release prep time | Hours (manual checklist) | Minutes (single helm command) — **40% reduction** |
+| Rollback | Find commit, re-run make, hope it works | `helm rollback` to any revision — **instant** |
+| Drift detection | None | Helm tracks release state |
+| Health checks | None — Swarm restarts on crash only | Liveness + Readiness probes |
+| Build failure rate | High — manual, error-prone | **35% reduction** via automated pipeline |
+| Environment separation | Laptop + shared instance (double-duty) | Dev → Test → Production with CI/CD promotion |
+| Reliability | Frequent outages from bad deploys | **99.9%+ uptime** for 8 mission apps |
 
 ### How to Draw the AFTER on a Whiteboard
 
-**Step 1 (top left):** Box: "Developer" with Git, Helm, kubectl inside. Arrows to "Helm Charts" and "Git Repo."
+**Draw the same 4 layers as the BEFORE, but clean:**
 
-**Step 2 (center):** Box: "Helm Charts" — application charts, shared library charts, values.yaml. This is the heart. Draw it prominent.
+**Layer 1 (top):** "Dev & Config" — Git Repo, Helm Charts (one per service), Shared Library Chart, values.yaml (dev/test/prod). Arrow: values.yaml feeds Helm charts, library inherited by all charts.
 
-**Step 3 (top right):** Box: "Git Repo (Remote)." Arrow from developer to Git, arrow from Git triggering CI.
+**Layer 2 (middle):** "Build & Deploy" — CI/CD Pipeline (triggered on push): build → push → lint → package → deploy. Single arrow down to the cluster. Dotted arrow back up labeled "helm rollback."
 
-**Step 4 (right):** Box: "CI/CD Pipeline" — build images, push to registry, lint, package, deploy. Show the numbered flow.
+**Layer 3 (main body):** "K8s Cluster" — Show ONE service (Jira) with: Deployment, Service, ConfigMap, Secret, PVC + PV, Liveness/Readiness probes. Write "same pattern x9" next to it. List all 9 services.
 
-**Step 5 (bottom):** Two boxes: "Dev Cluster" → "Test Cluster." CI deploys to Dev, test passes, promote to Test.
+**Layer 4 (bottom):** "Environments" — Dev Cluster → Test Cluster → Production. Arrows showing promotion path.
 
-**Step 6:** Draw arrows showing how Helm Charts connect to EVERYTHING — developers use them, CI packages them, clusters run them.
-
-Say: "Helm Charts are the center of everything now. One chart per service, shared library for common patterns, values.yaml per environment. Developer pushes, pipeline builds and deploys automatically. Rollback is one command. Release prep went from hours to minutes — forty percent reduction."
+Say: "Same four layers as before, but everything is clean. Config layer: Helm charts replace Gomplate — industry standard, values per environment, shared library for common patterns. Build layer: CI/CD pipeline replaces Makefiles — push triggers everything automatically, rollback is one command. Runtime: Kubernetes replaces Swarm — every service gets health checks, resource limits, persistent storage with reclaim policies. And now we have real environment separation: dev, test, production with automated promotion. Release prep went from hours to minutes. Forty percent reduction."
 
 ---
 
