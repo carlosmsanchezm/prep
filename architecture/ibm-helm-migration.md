@@ -316,6 +316,71 @@ Every Service gets a DNS entry automatically: `<service-name>.<namespace>.svc.cl
 **How to explain to Andy:**
 "In Compose, services find each other through depends_on and Docker's internal DNS. In K8s, every Service gets a DNS name automatically — jira just calls postgres-jira and K8s resolves it. No hardcoded IPs, no depends_on ordering. If the postgres pod restarts on a different node with a different IP, the Service DNS name still works because the Service tracks the pod by label selector, not by IP."
 
+### External Traffic + Service Mesh — When Do You Need Istio?
+
+You do NOT need Istio just to expose services. Here's the progression:
+
+| Need | Solution | Service mesh needed? |
+|------|----------|---------------------|
+| Service-to-service inside cluster | ClusterIP Service | No |
+| Expose one service externally (dev/test) | NodePort Service | No |
+| Expose externally (production, cloud) | LoadBalancer Service | No |
+| Route external traffic to multiple services by URL/hostname | Ingress Controller (Nginx, Traefik) | No |
+| mTLS between all services, traffic policies, observability, canary | **Istio Service Mesh** | **Yes** |
+
+**When do you add Istio?**
+When you need MORE than routing. Istio adds:
+- **mTLS everywhere** — every pod-to-pod call encrypted and mutually authenticated, automatically via sidecar proxies
+- **Traffic policies** — rate limiting, retries, circuit breaking
+- **Observability** — which service called which, latency, error rates (without changing app code)
+- **Canary deployments** — send 5% of traffic to new version, watch metrics, then roll out
+
+**For the IBM migration:** Didn't need Istio. Nine internal tools, no mTLS requirement. ClusterIP Services + Ingress controller for external access (users hitting Jira's web UI) was enough.
+
+**For VivSoft/DoD:** Needed Istio — zero-trust requirement means every pod-to-pod call must be encrypted. Compliance mandates mTLS.
+
+**For Anduril:** They'd eventually want it for zero-trust on classified networks, but they're not there yet with no K8s in production.
+
+### CNI — How Pods Actually Talk to Each Other (Calico, Flannel, Canal)
+
+**What is a CNI?**
+CNI = Container Network Interface. K8s doesn't provide networking itself — it defines the RULES (every pod gets an IP, every pod can reach every other pod) but delegates the HOW to a CNI plugin. Without a CNI, pods can't communicate.
+
+**What the CNI does:**
+1. **Assigns IPs to pods** — each pod gets a unique IP from a CIDR range the CNI manages
+2. **Routes traffic between pods** — even across nodes. Pod on Node A talks to pod on Node B
+3. **Enforces NetworkPolicies** — "only frontend can talk to backend on port 8080" becomes iptables rules on each node
+
+**Common CNIs and when to use each:**
+
+| CNI | How it works | When to use | Where I used it |
+|-----|-------------|-------------|-----------------|
+| **Calico** | BGP routing — each node announces pod CIDRs. Direct routing, best performance. Also does NetworkPolicy enforcement. | When network supports BGP. High-performance production. | — |
+| **Flannel** | VXLAN overlay — encapsulates pod traffic in VXLAN packets. Works on any network. | Simple setup, any network. Slightly more overhead than BGP. | — |
+| **Canal** (Calico + Flannel) | Flannel for pod-to-pod networking (VXLAN), Calico for NetworkPolicy enforcement. Best of both. | **RKE2 default.** On-prem where BGP isn't available but you need policy enforcement. | Nightwatch RKE2 platform |
+| **AWS VPC CNI** | Each pod gets a REAL VPC IP address. No overlay, no encapsulation. Pods are directly routable within the VPC. | **EKS default.** Cloud environments where you want pods to be VPC-native. | VivSoft JCRS-E on EKS |
+
+**What this looks like in production:**
+
+- **Cloud (EKS):** AWS VPC CNI — each pod gets a real VPC IP. No overlay network. Pods are directly routable within the VPC. Security groups can apply directly to pods. Fast, native, but AWS-specific.
+- **On-prem / air-gapped (RKE2):** Canal — VXLAN overlay between nodes because on-prem networks usually don't support BGP. Pod IPs are virtual (only routable within the overlay). External traffic enters through NodePort or Ingress. Slightly more overhead but works everywhere.
+- **The key difference:** In cloud, pod IPs are real network IPs. On-prem, pod IPs are virtual overlay IPs. External traffic always enters through a Service (NodePort/LB) or Ingress — pods aren't directly reachable from outside regardless.
+
+**How to explain to Andy:**
+"K8s doesn't handle networking itself — it delegates to a CNI plugin. On the Nightwatch RKE2 cluster, we used Canal — Flannel for VXLAN overlay networking between nodes, Calico for NetworkPolicy enforcement. On VivSoft's EKS, it was the VPC CNI — pods get real VPC IPs, no overlay. The choice depends on environment: cloud gets native CNI, on-prem gets overlay because the underlying network usually doesn't support BGP routing for pod CIDRs."
+
+### What Does "Runtime" Mean?
+
+**Three phases to understand:**
+
+| Phase | When | Example |
+|-------|------|---------|
+| **Build time** | When you're creating the container image | `docker build` — installing packages, compiling code, copying files INTO the image |
+| **Deploy time** | When Helm installs/upgrades the chart | `helm install` — K8s creates the Deployment, Service, ConfigMap, PVC as resources in the cluster |
+| **Runtime** | When the container is actually running and serving traffic | The Jira pod is up, users are logged in, it's reading its DB_HOST from the ConfigMap RIGHT NOW |
+
+"Pods read ConfigMaps at runtime" means: the Jira container, while it's running and serving users, accesses the DB_HOST value that K8s mounted into it from the ConfigMap. The ConfigMap is a live K8s resource inside the cluster — not just a variable in a Helm template file. If you update the ConfigMap, the running pod can pick up the change (depending on how it's mounted).
+
 ### Persistent Storage — PVCs, PVs, and Scaling
 
 **The relationship: PVC → PV → Storage Backend**
@@ -330,6 +395,21 @@ Every Service gets a DNS entry automatically: `<service-name>.<namespace>.svc.cl
 - **PV (PersistentVolume):** the PROVISION. "Here's a 50Gi volume backed by NFS at server:/exports/jira." The admin or StorageClass creates this.
 - **StorageClass:** automates PV creation. Instead of an admin manually creating each PV, the StorageClass says "when someone requests storage, automatically provision it from this backend." Dynamic provisioning.
 - **Binding:** K8s matches a PVC to an available PV that meets its requirements (size, access mode, storage class). Once bound, that PV belongs to that PVC until released.
+
+**Storage Backend Types — What's Behind the PV?**
+
+| Storage | What it is | Access Mode | Use Case | Where I used it |
+|---------|-----------|-------------|----------|-----------------|
+| **NFS (Network File System)** | A server shares a directory over the network. Other machines mount it as if local. | ReadWriteMany (multiple pods simultaneously) | Shared data — multiple pods reading/writing same files. Datasets, model files, shared notebooks. | Nightwatch: EFS (AWS's managed NFS) for shared notebook storage |
+| **EBS (Elastic Block Store)** | Cloud block storage — like a virtual hard drive attached to one instance. | ReadWriteOnce (one pod at a time) | Dedicated data — one pod owns the volume. Databases, single-instance app data. | VivSoft: EBS for Vault data, Keycloak database |
+| **EFS (Elastic File System)** | AWS's managed NFS service. Shared, auto-scaling, no capacity planning. | ReadWriteMany | Same as NFS but managed — no server to maintain. | Nightwatch: Kubeflow notebook storage |
+| **Ceph / Longhorn** | Distributed storage systems running ON the K8s cluster. Replicate data across nodes. | ReadWriteOnce or ReadWriteMany | High-performance, self-healing. Production databases needing replication and fast IOPS. On-prem where there's no cloud storage. | — (would recommend for Anduril on-prem) |
+| **hostPath** | Local directory on the node's filesystem. | ReadWriteOnce (tied to ONE specific node) | Dev/test ONLY. Pod is stuck on that node forever. Never production. | Local testing only |
+
+**NFS in more detail (since Anduril is on-prem, this matters):**
+NFS = one server exports a directory (e.g., `/exports/shared-data`), other machines mount it over the network. In K8s, a PV points to that NFS share, and pods mount the PV. Multiple pods can mount it simultaneously — that's the key advantage over block storage.
+
+For Anduril's on-prem environment: NFS would be the go-to for shared storage. A dedicated NFS server (or a VM) exports directories, K8s PVs reference them. For higher performance or self-healing, Longhorn runs as pods inside the K8s cluster itself and provides distributed block storage — no external server needed.
 
 **Reclaim Policies (critical — this is what makes or breaks data safety):**
 
