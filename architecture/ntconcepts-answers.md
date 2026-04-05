@@ -507,101 +507,115 @@ config:
   theme: dark
 ---
 flowchart TD
-    subgraph AWS_Services["Core AWS Services"]
+    subgraph AWS_Services["Core AWS Services (air-gap controlled — only reachable via allowlisted egress)"]
         direction LR
-        ECR["ECR<br/>Container Registry<br/>(images pre-pushed)"]:::aws
+        ECR["ECR<br/>Container Registry<br/>(images pre-pushed<br/>on connected side)"]:::aws
         S3["S3 Buckets<br/>- terraform-state<br/>- pipeline-artifacts"]:::aws
         SecretsManager["Secrets Manager<br/>DB passwords, API keys"]:::aws
         IAM["IAM<br/>OIDC Provider<br/>IRSA roles per pod"]:::aws
     end
 
-    subgraph VPC["VPC: ntc-2023-studiodx-demo (Private Subnets)"]
+    subgraph BirdDog["Bird-Dog Network (Controlled Egress — Simulated Air-Gap)"]
         direction TB
 
-        NLB["NLB<br/>(public subnet — only entry point)"]:::aws
+        subgraph Directory_Spoke["Directory Spoke VPC"]
+            Workspaces["AWS Workspaces<br/>(user RDP entry point)"]:::user
+        end
 
-        subgraph RKE2_Cluster["RKE2 Kubernetes Cluster"]
+        TGW["Transit Gateway<br/>(hub — connects all spoke VPCs)"]:::network
+
+        subgraph NFW_VPC["Inspection VPC"]
+            NFW["Network Firewall<br/>deny-by-default<br/>allowlist: ECR, S3, STS only"]:::network
+        end
+
+        subgraph Nightwatch_VPC["Nightwatch VPC: ntc-2023-studiodx-demo"]
             direction TB
 
-            subgraph Control_Plane["Control Plane (ASG: 3 nodes)"]
-                direction LR
-                CP1["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
-                CP2["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
-                CP3["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
-            end
+            NLB["NLB (Network Load Balancer)<br/>internal — reachable from<br/>Workspaces via TGW only<br/>(NOT internet-facing)"]:::aws
 
-            subgraph Workers["Worker Nodes"]
-                direction LR
-                subgraph CPU_ASG["CPU ASG"]
-                    CPU1["m5a.2xlarge<br/>rke2-agent"]:::k8s
+            subgraph RKE2_Cluster["RKE2 Kubernetes Cluster (private subnets)"]
+                direction TB
+
+                subgraph Control_Plane["Control Plane (ASG: 3 nodes · HA)"]
+                    direction LR
+                    CP1["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
+                    CP2["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
+                    CP3["m5a.large<br/>rke2-server<br/>embedded etcd"]:::k8s
                 end
-                subgraph GPU_ASG["GPU ASG"]
-                    GPU1["g4dn.xlarge<br/>rke2-agent<br/>+ NVIDIA Operator"]:::k8s
+
+                subgraph Workers["Worker Nodes (run all pods — infra + app workloads)"]
+                    direction LR
+                    subgraph CPU_ASG["CPU ASG"]
+                        CPU1["m5a.2xlarge<br/>rke2-agent"]:::k8s
+                    end
+                    subgraph GPU_ASG["GPU ASG"]
+                        GPU1["g4dn.xlarge<br/>rke2-agent<br/>+ NVIDIA Operator"]:::k8s
+                    end
+                end
+
+                subgraph Infra_Services["Infrastructure Services (I deployed via ArgoCD)"]
+                    Istio["Istio<br/>service mesh + ingress gateway"]:::k8s
+                    ArgoCD_Pod["ArgoCD<br/>polls argoflow repo every 3min<br/>syncs manifests → kubectl apply"]:::gitops
+                    Autoscaler["Cluster Autoscaler<br/>watches pending pods<br/>scales ASGs via IRSA"]:::k8s
+                    ExtSecrets["External Secrets<br/>syncs AWS Secrets Manager<br/>→ K8s Secrets via IRSA"]:::k8s
+                    Keycloak["Keycloak<br/>SSO identity provider"]:::k8s
+                    Monitoring["Prometheus + Grafana + Loki<br/>metrics, dashboards, logs"]:::k8s
+                end
+
+                subgraph App_Workloads["Application Workloads (deployed by ArgoCD, run on Workers)"]
+                    Kubeflow["Kubeflow<br/>(notebooks, pipelines, serving)<br/>12 data scientists · tripled throughput"]:::app
                 end
             end
 
-            subgraph Infra_Services["Infrastructure Services (I deployed + managed)"]
-                ArgoCD["ArgoCD<br/>GitOps — syncs from Git"]:::gitops
-                Istio["Istio<br/>service mesh + ingress"]:::k8s
-                Autoscaler["Cluster Autoscaler<br/>scales ASGs via IRSA"]:::k8s
-                ExtSecrets["External Secrets<br/>syncs Secrets Manager<br/>→ K8s Secrets"]:::k8s
-                Keycloak["Keycloak<br/>SSO for all services"]:::k8s
-                Monitoring["Prometheus + Grafana + Loki<br/>metrics, dashboards, logs"]:::k8s
+            subgraph Data_Services["Managed Data Services (private subnets)"]
+                direction LR
+                RDS["RDS PostgreSQL<br/>ArgoCD DB · Keycloak DB<br/>Kubeflow DB"]:::aws
+                EFS["EFS (NFS)<br/>shared pod storage<br/>ReadWriteMany"]:::aws
             end
-
-            subgraph App_Workloads["Application Workloads (ran on top)"]
-                Kubeflow["Kubeflow<br/>(notebooks, pipelines, model serving)<br/>12 data scientists · tripled throughput"]:::app
-            end
-        end
-
-        subgraph Data_Services["Managed Data Services"]
-            direction LR
-            RDS["RDS PostgreSQL<br/>ArgoCD DB · Keycloak DB<br/>Kubeflow DB"]:::aws
-            EFS["EFS<br/>shared pod storage"]:::aws
         end
     end
 
-    %% DevOps Engineer flow (GitOps)
-    DevOps["DevSecOps Engineer"]:::user -- "git push" --> GitRepo["argoflow Git Repo<br/>(source of truth)"]:::gitops
-    GitRepo -. "watches" .-> ArgoCD
-    ArgoCD -. "syncs manifests<br/>to cluster" .-> Infra_Services
-    ArgoCD -. "deploys" .-> App_Workloads
+    %% USER ACCESS PATH (Bird-Dog controlled)
+    User["Data Scientist /<br/>Engineer"]:::user -- "1. RDP" --> Workspaces
+    Workspaces -- "2. browser via TGW" --> NLB
+    NLB -- "3. TCP forward" --> Istio
 
-    %% External access
-    NLB -- "TCP traffic" --> Istio
+    %% GITOPS FLOW
+    DevOps["DevSecOps Engineer"]:::user -- "git push manifests" --> GitRepo["argoflow<br/>Git Repository<br/>(K8s manifests = source of truth)"]:::gitops
+    GitRepo -. "ArgoCD polls every 3 min<br/>detects changes" .-> ArgoCD_Pod
+    ArgoCD_Pod -. "kubectl apply<br/>(syncs desired state<br/>to cluster)" .-> Infra_Services
+    ArgoCD_Pod -. "deploys app manifests<br/>to worker nodes" .-> App_Workloads
 
-    %% AWS integrations (IRSA-based)
-    Autoscaler -- "assumes IAM role<br/>(IRSA)" --> IAM
-    IAM -. "modify ASG<br/>desired count" .-> GPU_ASG
-    IAM -. "modify ASG" .-> CPU_ASG
-    ExtSecrets -- "reads secrets<br/>(IRSA)" --> SecretsManager
-    CPU1 -- "pull images<br/>(registries.yaml → ECR)" --> ECR
-    GPU1 -- "pull images" --> ECR
+    %% SPOKE NETWORKING
+    Nightwatch_VPC -- "TGW attachment (spoke)" --> TGW
+    Directory_Spoke -- "TGW attachment (spoke)" --> TGW
+    TGW -- "all outbound egress" --> NFW
+    NFW -- "allowed only:<br/>ECR, S3, STS" --> AWS_Services
 
-    %% Storage connections
-    Keycloak -- "DB connection" --> RDS
-    ArgoCD -- "DB connection" --> RDS
+    %% AWS INTEGRATIONS (IRSA — pod-level IAM)
+    Autoscaler -- "assumes IAM role (IRSA)" --> IAM
+    IAM -. "modifies ASG desired count" .-> GPU_ASG
+    IAM -. "modifies ASG desired count" .-> CPU_ASG
+    ExtSecrets -- "reads secrets (IRSA)" --> SecretsManager
+
+    %% IMAGE PULLS (air-gap via registries.yaml)
+    CPU1 -- "pull images<br/>(registries.yaml<br/>→ ECR via allowlist)" --> ECR
+    GPU1 -- "pull images<br/>(registries.yaml → ECR)" --> ECR
+
+    %% STORAGE
+    Keycloak -- "DB" --> RDS
+    ArgoCD_Pod -- "DB" --> RDS
     Kubeflow -- "DB + artifacts" --> RDS
-    Kubeflow -- "artifacts" --> S3
-    App_Workloads -- "mount shared<br/>storage" --> EFS
+    Kubeflow -- "pipeline artifacts" --> S3
+    App_Workloads -- "mount shared storage" --> EFS
 
-    %% Network security (Bird-Dog connection)
-    subgraph BirdDog["Bird-Dog Network Architecture"]
-        TGW["Transit Gateway<br/>(hub — shared via RAM)"]:::network
-        NFW["Network Firewall<br/>deny-by-default<br/>only allowlisted domains:<br/>ECR, S3, STS endpoints"]:::network
-    end
+    %% IaC + CONFIG MANAGEMENT
+    Terraform["Terraform<br/>(provisions all AWS:<br/>VPC, ASGs, RDS, EFS, ECR,<br/>IAM, TGW attachment, NFW rules)"]:::iac -- "provisions" --> AWS_Services
+    Terraform -- "provisions" --> Nightwatch_VPC
+    Terraform -- "provisions" --> BirdDog
 
-    VPC -- "TGW attachment<br/>(spoke)" --> TGW
-    TGW -- "all egress" --> NFW
-    NFW -- "allowed traffic only<br/>(ECR, S3, STS)" --> Internet["Internet<br/>(controlled egress)"]:::network
-
-    %% Terraform manages all AWS
-    Terraform["Terraform<br/>(manages all AWS infra:<br/>VPC, ASGs, RDS, EFS,<br/>ECR, IAM, TGW attachment)"]:::iac -- "provisions" --> AWS_Services
-    Terraform -- "provisions" --> VPC
-
-    %% Ansible bootstraps nodes
-    Ansible["Ansible<br/>(bootstraps RKE2 nodes:<br/>install binary, config.yaml,<br/>registries.yaml, firewall ports,<br/>start rke2 service)"]:::iac -- "bootstraps" --> Control_Plane
-    Ansible -- "joins workers" --> Workers
+    Ansible["Ansible<br/>(bootstraps RKE2 nodes:<br/>binary, config.yaml,<br/>registries.yaml, firewall,<br/>start rke2 service)"]:::iac -- "bootstraps servers<br/>(serial: 1 for etcd)" --> Control_Plane
+    Ansible -- "joins workers<br/>(parallel)" --> Workers
 
     classDef aws fill:#fff3cd,stroke:#856404,stroke-width:2px
     classDef k8s fill:#f8d7da,stroke:#721c24,stroke-width:2px
@@ -614,23 +628,29 @@ flowchart TD
 
 ### What This DevOps-Focused Diagram Shows
 
-**Compared to Chart 3 (full reference), this diagram:**
-- Removes: oauth2-proxy auth chain, KServe, Knative, KF Pipelines details, data scientist user flow
-- Adds: Terraform (provisions all AWS infra), Ansible (bootstraps RKE2 nodes)
-- Separates: Infrastructure Services (what I managed) from Application Workloads (what ran on top)
-- Emphasizes: IRSA connections (how pods access AWS), registries.yaml (how images pull in air-gap), GitOps flow (ArgoCD syncs from Git)
+**Fixes from previous version:**
+- ArgoFlow is now labeled as "Git Repository (K8s manifests = source of truth)" — it's a REPO, not a tool. ArgoCD polls it every 3 min.
+- ArgoCD now says "kubectl apply (syncs desired state to cluster)" — clear what "syncs manifests" means
+- NLB is now "internal — reachable from Workspaces via TGW only (NOT internet-facing)"
+- User access path shown: RDP → Workspaces → TGW → NLB → Istio (Bird-Dog controlled)
+- Bird-Dog is now a containing box around ALL VPCs showing the spoke architecture
+- Egress path clear: Nightwatch VPC → TGW → NFW → only allowlisted AWS services
+- App Workloads box is INSIDE the RKE2 Cluster and labeled "deployed by ArgoCD, run on Workers"
+- Ansible deploys NODES only. ArgoCD deploys EVERYTHING that runs inside the cluster.
+- Terraform provisions Bird-Dog network infrastructure too (TGW, NFW rules)
 
 **The story it tells:**
-1. **Terraform provisions the AWS foundation** — VPC, subnets, ASGs, RDS, EFS, ECR, IAM roles, TGW attachment to Bird-Dog
-2. **The VPC is a spoke in the Bird-Dog network** — all egress routes through Transit Gateway to Network Firewall. Deny-by-default — only allowlisted domains (ECR, S3, STS) can be reached. This is controlled-egress, not open internet.
-3. **Ansible bootstraps the RKE2 nodes** — installs binary, writes config, writes registries.yaml, opens ports, starts service
-4. **ArgoCD deploys everything inside the cluster** — syncs manifests from Git, no manual kubectl
-5. **IRSA gives pods AWS access** — Cluster Autoscaler assumes an IAM role to scale ASGs, External Secrets assumes a role to read Secrets Manager
-6. **registries.yaml redirects image pulls** — containerd pulls from ECR (on the allowlist) instead of public internet
-7. **Application workloads run on top** — Kubeflow for the data science team, but that's their layer, not mine
+1. **The entire environment sits inside Bird-Dog** — spoke VPCs connected via Transit Gateway, all egress through Network Firewall. Deny-by-default. Only ECR, S3, STS allowlisted. No open internet.
+2. **Users access via Workspaces** — RDP into AWS Workspaces in the Directory spoke, then browser through TGW to the NLB in the Nightwatch spoke. NLB is NOT internet-facing.
+3. **Terraform provisions ALL AWS infrastructure** — VPC, ASGs, RDS, EFS, ECR, IAM, AND the Bird-Dog network (TGW attachment, NFW rules)
+4. **Ansible bootstraps the RKE2 nodes** — binary, config, registries.yaml, firewall, service. Servers serial (etcd ordering), workers parallel.
+5. **ArgoCD deploys everything IN the cluster** — polls the argoflow Git repo every 3 minutes, detects changes, runs kubectl apply to sync desired state. Deploys both infra services AND app workloads. Ansible doesn't touch applications.
+6. **IRSA gives pods AWS access** — Autoscaler assumes IAM role to scale ASGs, External Secrets assumes role to read Secrets Manager. Pod-level least-privilege.
+7. **registries.yaml redirects image pulls to ECR** — containerd on every node pulls from ECR via the Bird-Dog allowlist. Never hits public internet.
+8. **Application workloads run ON the worker nodes** — Kubeflow pods scheduled onto CPU/GPU workers by K8s scheduler. Deployed by ArgoCD from Git, not by Ansible.
 
 **Why the Bird-Dog connection matters for Anduril:**
-"This cluster sat inside our Bird-Dog hub-and-spoke network. All egress went through Network Firewall with deny-by-default. Only ECR, S3, and STS endpoints were allowlisted. So even though we had internet, it was controlled — no unauthorized outbound calls. That's the same posture Anduril needs: controlled egress through a diode, only known-good destinations. The pattern scales from 'controlled internet' to 'fully air-gapped' — same registries.yaml, same ArgoCD, just swap ECR for local Nexus and the firewall for a diode."
+"This cluster sat inside our Bird-Dog hub-and-spoke network. Users RDP'd into Workspaces, accessed services through the Transit Gateway — never direct internet. All egress went through Network Firewall with deny-by-default. Only ECR, S3, and STS endpoints were allowlisted. That's the same posture Anduril needs: controlled access in, controlled egress out. The pattern scales from 'controlled internet' to 'fully air-gapped' — same registries.yaml, same ArgoCD, just swap ECR for local Nexus and the firewall for a diode."
 
 ---
 
