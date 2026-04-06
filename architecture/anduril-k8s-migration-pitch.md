@@ -14,13 +14,13 @@
 
 "At IBM Federal, I walked into a nearly identical setup — Docker Compose, Swarm, Makefiles, Python scripts, Gomplate templating. Nine services serving six hundred users: Jira, Bitbucket, Confluence, Jenkins, Artifactory, and four others. No orchestration, no rollback, every release was a manual checklist.
 
-I led the migration to Kubernetes with Helm. Four phases: first, two weeks defining standards and chart templates. Then nine weeks migrating one service per week — convert values, write templates, test individually, test the whole stack. Testing ran in parallel the whole time. Final two weeks were documentation and training — brown-bag sessions, runbooks, self-healing guides so ops could handle eighty percent of incidents without me.
+I led the migration to Kubernetes with Helm. Four phases: first, two weeks defining standards and the shared library chart template. Then eighteen weeks migrating one service every two weeks — first week writing the chart and converting configs, second week testing at every layer. Testing ran in parallel the whole time. Final two weeks were documentation and training — brown-bag sessions, runbooks, self-healing guides so ops could handle eighty percent of incidents without me.
 
 Result: cut release prep forty percent, hardened the platform to STIG/FIPS baselines, reliability hit ninety-nine point nine percent for eight mission apps. Then I designed and started implementing the next step — migrating from vanilla K8s to OpenShift for better multi-tenancy and build integration."
 
 ### Part 3: "And I've run K8s air-gapped" (60 seconds)
 
-"Separately at NTConcepts, I built an RKE2 cluster for classified ML workloads — completely air-gapped. Three control plane nodes with embedded etcd, CPU and GPU worker pools with g4dn instances, NVIDIA GPU Operator for automatic driver injection. ArgoCD for GitOps — syncing from a local Git repo, pulling images from a local ECR mirror. Keycloak SSO so data scientists got self-service notebooks without managing credentials. Cluster Autoscaler handled GPU scheduling — when a scientist launched a training job, it spun up a GPU node automatically, then scaled back down when done. Tripled model-training throughput for twelve data scientists."
+"Separately at NTConcepts, I built an RKE2 cluster inside a controlled-egress environment — our Bird-Dog hub-and-spoke network with deny-by-default egress through Network Firewall. Terraform provisioned the AWS infrastructure — VPC, ASGs, RDS, EFS, IAM roles with IRSA for pod-level access. Ansible bootstrapped the nodes — I wrote custom roles that installed the RKE2 binary, wrote the config and registries.yaml to redirect image pulls to our ECR mirror, opened firewall ports, and started the rke2-server and agent services. Three control plane nodes for HA with embedded etcd, CPU and GPU worker pools managed by Cluster Autoscaler. ArgoCD deployed everything inside the cluster from a local Git repo — infrastructure services like Istio, Keycloak, and monitoring, plus the application workloads. External Secrets Operator synced credentials from AWS Secrets Manager into the cluster via IRSA. The whole thing ran with zero internet access — only allowlisted AWS endpoints through the firewall. Tripled throughput for twelve data scientists."
 
 ### Part 4: "Here's how I'd do it for you" (90 seconds)
 
@@ -30,9 +30,9 @@ Phase zero — two weeks — I'd spin up a single-node RKE2 cluster on a spare m
 
 Phase one — if it proves value — move GitLab runners to K8s. Runners are stateless and ephemeral — lowest risk migration, highest scaling benefit. K8s autoscaling handles the 'pipeline jobs doubled in a month' problem natively. Keep everything else on Podman.
 
-Phase two — migrate stateless internal tools. Use Podman's 'generate kube' to create initial manifests from existing Compose setups. ArgoCD for GitOps so drift is caught automatically.
+Phase two — migrate stateless internal tools. Use Podman's 'generate kube' to create initial K8s manifests from existing Compose setups, then templatize into Helm charts. Set up ArgoCD to manage deployments — push manifests to a Git repo, ArgoCD syncs them to the cluster automatically. No more manual deploys. If someone changes something in the cluster manually, ArgoCD detects the drift and reverts it. That's the GitOps layer you don't have today.
 
-Phase three — if phases zero through two worked, tackle stateful services with StatefulSets and persistent volumes.
+Phase three — if phases zero through two worked, tackle stateful services with StatefulSets and persistent volumes. Design the storage layer — StorageClass for dynamic provisioning, Retain reclaim policy for production data."
 
 The key: each phase is independently valuable and independently reversible. If phase one saves time, great — phase two is optional. No big-bang, no half-assing it, and I've done every step of this before."
 
@@ -73,15 +73,34 @@ The key: each phase is independently valuable and independently reversible. If p
 
 ## Component Study List (go deep on these for Andy)
 
-### RKE2 Air-Gap Install
+### RKE2 Air-Gap Install (all done by Ansible roles)
+
+**Pre-transfer (connected side — manual or pipeline):**
 1. Download RKE2 binary + images tarball on connected side
-2. Transfer to air-gapped host
-3. Place images in `/var/lib/rancher/rke2/agent/images/`
-4. Place binary at `/usr/local/bin/rke2`
-5. Create `/etc/rancher/rke2/config.yaml` with server URL + token
-6. Create `/etc/rancher/rke2/registries.yaml` pointing to local Nexus
-7. `systemctl enable --now rke2-server` (first node) or `rke2-agent` (workers)
-8. Verify: `/var/lib/rancher/rke2/bin/kubectl get nodes`
+2. Transfer to air-gapped hosts (via diode, USB, or S3)
+
+**Ansible `common` role (runs on ALL nodes):**
+3. Disable swap, load kernel modules (br_netfilter, overlay)
+4. Set sysctl params (ip_forward, bridge-nf-call-iptables)
+5. Open firewall ports (6443, 9345, 10250, 2379-2380, 8472/UDP)
+
+**Ansible `rke2-server` role (control plane — serial: 1 for etcd ordering):**
+6. Copy binary to `/usr/local/bin/rke2`
+7. Copy images tarball to `/var/lib/rancher/rke2/agent/images/`
+8. Template `config.yaml` (server URL, token, CIS profile, TLS SANs)
+9. Template `registries.yaml` (redirect image pulls to local Nexus/ECR)
+10. `systemctl enable --now rke2-server`
+11. Wait for API server to be ready (retry loop)
+
+**Ansible `rke2-agent` role (workers — parallel):**
+12. Same binary + images copy
+13. Template `config.yaml` (just server URL + token + node labels)
+14. Template `registries.yaml` (same as servers)
+15. `systemctl enable --now rke2-agent`
+
+**Verify:** `/var/lib/rancher/rke2/bin/kubectl get nodes` — all nodes Ready
+
+**One command runs everything:** `ansible-playbook -i inventory/production.yml playbooks/site.yml`
 
 ### registries.yaml (know this file cold)
 ```yaml
@@ -109,19 +128,6 @@ configs:
 | 10250 | TCP | kubelet metrics |
 | 2379-2380 | TCP | etcd client/peer (server nodes only) |
 | 8472 | UDP | VXLAN (Canal CNI) |
-
-### Cluster Autoscaler + GPU Flow
-```
-1. Data scientist requests GPU notebook
-2. Pod created with nvidia.com/gpu: 1 resource request
-3. Scheduler: no node with free GPU → pod Pending
-4. Cluster Autoscaler: detects pending pod → checks ASG
-5. ASG desired count increased → new g4dn node launches
-6. NVIDIA GPU Operator: detects GPU on new node → installs driver
-7. Pod scheduled on new node → training starts
-8. Training complete → pod terminates → no pending GPU pods
-9. Cluster Autoscaler: scales ASG back down after cooldown
-```
 
 ---
 
