@@ -555,6 +555,154 @@ containerd pulls from ecr.local instead — PRIVATE, no internet
 
 ---
 
+## 11. SIPRNET Transfer — What Are the Physical Controls?
+
+We did NOT use a diode or USB drives. The transfer went through a **Cross-Domain Solution (CDS)** — a government-approved device that sits between networks at different classification levels.
+
+**The flow:**
+1. Build Zarf bundles on unclassified GitLab CI → push to S3
+2. Hand off to the government's CDS — USCYBERCOM owns and operates it, not us
+3. CDS scans, reviews, and transfers the bundle to the SIPRNET staging area
+4. On SIPRNET, a SEPARATE GitLab CI instance (completely independent, air-gapped) picks up the bundle
+5. SIPRNET pipeline validates checksums, runs UDS deploy, executes verification jobs
+
+**Key points:**
+- YOU don't physically cross the boundary — you build, sign, hand off
+- The two GitLab instances NEVER connect — the bundle is the contract between them
+- The CDS is the government's responsibility — you don't operate it
+- The SIPRNET pipeline only has DEPLOY stages (no build — no internet for that)
+
+**How to explain:** "For SIPRNET, the transfer goes through a government-operated cross-domain solution. We build and sign bundles on the unclassified side, hand them off, and the CDS handles the boundary crossing after scanning. On the SIPRNET side, a separate GitLab instance picks up transferred bundles and deploys locally. The two pipelines never connect."
+
+---
+
+## 12. The Air-Gap Pipeline on the Cluster Side
+
+It's a SEPARATE GitLab CI instance running INSIDE the air-gapped network. Completely independent from the unclassified GitLab.
+
+```
+UNCLASSIFIED GitLab CI:                SIPRNET GitLab CI (separate instance):
+
+Repo: leviathan                        Repo: release-automation (local copy)
+Pipeline:                              Pipeline:
+  1. Pull images from Iron Bank          1. Check staging dir for new bundles
+  2. Scan with Trivy                     2. Verify checksums (sha256)
+  3. Bundle with Zarf                    3. Pull bundle version from config
+  4. Push to S3                          4. UDS deploy core bundle
+  5. Hand off to CDS                     5. UDS deploy enterprise bundle
+                                         6. Run verification jobs
+NO CONNECTION ←─────────────────────→ NO CONNECTION
+        ↓                                     ↑
+   S3 → CDS transfer → staging directory
+```
+
+**Where is it defined?** In the `release-automation` repo — same pipeline YAML structure, but the SIPRNET copy only has DEPLOY stages (no build stages — building needs internet).
+
+**Where does it run?** On a GitLab runner inside SIPRNET — air-gapped VM, no outbound. Pulls bundles from local storage where the CDS deposited them.
+
+---
+
+## 13. How Kapitan Handles Classification Separation
+
+**"If Kapitan shares configs for all environments, doesn't that violate classification boundaries?"**
+
+No — because the REPO stays unclassified. Here's how:
+
+```
+jcrs-cac repo (lives on UNCLASSIFIED side):
+├── classes/defaults/bb-vault.yml          # shared defaults
+├── classes/environments/dev.yml           # unclassified dev values
+├── classes/environments/prod.yml          # unclassified prod values
+├── classes/environments/siprnet-prod.yml  # SIPRNET-specific values
+├── targets/dev-cluster.yml                # compile for dev
+├── targets/prod-cluster.yml               # compile for prod
+└── targets/siprnet-prod.yml               # compile for SIPRNET
+```
+
+**The compile step runs on the UNCLASSIFIED side.** It generates outputs for ALL environments, including SIPRNET. But the SIPRNET target's values are NOT classified — they're just configuration: "use this registry, this account ID, this domain." These values describe WHERE to deploy, not classified content.
+
+The COMPILED output for SIPRNET gets Zarf-bundled and transferred via CDS. The Kapitan repo itself stays unclassified.
+
+**What about truly classified values?**
+Anything classified — like SIPRNET-specific secrets, hostnames that can't exist on the unclassified side — gets injected at DEPLOY TIME from Vault on the SIPRNET side. Never stored in the Kapitan repo.
+
+```
+Unclassified Kapitan repo → compile → SIPRNET output (non-classified config values)
+                                            ↓
+                                      bundle with Zarf
+                                            ↓
+                                      transfer via CDS
+                                            ↓
+                              SIPRNET deploy + Vault injects classified secrets
+```
+
+**How to explain:** "The Kapitan repo stays unclassified — it contains configuration values, not classified data. We compile all targets on the unclassified side. SIPRNET values like registry endpoints are just configuration — not classified. Anything truly classified gets injected at deploy time from Vault on the classified side, never stored in the config repo."
+
+---
+
+## 14. One Kapitan Class → Multiple Outputs (Traced in Detail)
+
+`bb-vault.yml` defines variables. MULTIPLE templates reference those same variables and produce DIFFERENT output files:
+
+```yaml
+# classes/defaults/bb-vault.yml (ONE source of truth)
+parameters:
+  vault_replicas: 3
+  vault_memory: "8Gi"
+  vault_ha_enabled: true
+  vault_bundle_version: "v0.9.27"
+  vault_rds_instance_class: "db.t3.medium"
+  vault_rds_storage: "20Gi"
+```
+
+**Output 1 — Helm values (bb-inputs.yaml):**
+Template `bb-inputs.yaml.j2` uses `vault_replicas`, `vault_memory`, `vault_ha_enabled`
+→ Generates Helm values override passed to UDS when deploying the Vault Zarf package
+
+**Output 2 — Deploy script (install_enterprise_profile.sh):**
+Template `install_enterprise_profile.sh.j2` uses `vault_bundle_version`, `vault_ha_enabled`
+→ Generates the actual shell script the pipeline runs: `uds deploy uds-bundle-jcrs-upms-v0.9.27.tar.zst`
+
+**Output 3 — Crossplane claim (vault-crossplane.yaml):**
+Template `vault-crossplane.yaml.j2` uses `vault_rds_instance_class`, `vault_rds_storage`
+→ Generates the Crossplane YAML that provisions Vault's RDS PostgreSQL backend
+
+**Output 4 — Pipeline config (build.sh):**
+Template `build.sh.j2` uses `vault_bundle_version`
+→ Generates pipeline variables: which bundle version to deploy, which toggles are on
+
+**ALL FOUR from the SAME variables.** Change `vault_bundle_version` in `bb-vault.yml`:
+- Deploy script updates the bundle filename
+- Pipeline config updates the version variable
+- Helm values and Crossplane don't care about bundle version, stay unchanged
+
+Change `vault_replicas`:
+- Helm values update replicas count
+- Deploy script's UDS set values update
+- Crossplane and pipeline config don't reference replicas, stay unchanged
+
+**ONE source → MANY consumers. No drift between them.**
+
+---
+
+## 15. Nix vs Kapitan — Different Problems
+
+| | Kapitan | Nix |
+|-|---------|-----|
+| **What it does** | Compiles templates → config files, scripts, YAML | Builds software → packages, images, environments |
+| **Problem** | "Generate different configs for 8 environments from one template" | "Guarantee identical build output on any machine" |
+| **Input** | Jinja2 templates + YAML variables | Nix expressions (functional language) |
+| **Output** | Shell scripts, Helm values, Crossplane YAML | Software packages, container images |
+| **Key property** | Inheritance (classes override defaults) | Content-addressable (same inputs = same output, always) |
+| **At VivSoft** | Used — generates all deployment configs | Not used |
+| **At Anduril** | Not used | Used heavily for reproducible builds |
+
+**They don't overlap.** Nix builds. Kapitan configures. You could use both: Nix builds the container images, Kapitan generates the configs that deploy them.
+
+**If Andy mentions Nix:** "Nix solves reproducible builds — same inputs always produce identical output. Kapitan solves environment configuration — same templates produce different outputs per environment via class inheritance. Different problems. You could use Nix to build your images and Kapitan to manage which image version deploys to which environment."
+
+---
+
 ## Quick Test — Can You Explain Each Concept?
 
 Close this file and answer these aloud. If you can't, re-read the section.
@@ -564,8 +712,13 @@ Close this file and answer these aloud. If you can't, re-read the section.
 3. What's the difference between Kustomize and Kapitan? (patches vs inheritance — give the "change Vault port" example)
 4. What's a VPC endpoint? (private door to AWS service, no internet needed)
 5. How big was your cluster? (20+ services, 30-50 pods, 4 programs — complex, not massive)
-6. Did you use a diode? (No — S3 + VPC endpoints. Anduril uses diode. Same concept, different transfer.)
-7. Why custom Helm charts instead of official ones? (Atlassian didn't have them, air-gapped, years of custom config in Compose files)
+6. Did you use a diode? (No — S3 + VPC endpoints for unclass. CDS for SIPRNET. Anduril uses diode.)
+7. Why custom Helm charts instead of official ones? (Atlassian didn't have them, air-gapped, years of custom config)
 8. What are the 8 environments? (shared dev, ephemerals, staging left/right, production, SIPRNET staging/prod)
-9. Does registries.yaml only apply during bootstrap? (No — it configures containerd on the NODE. ALL pods, forever.)
+9. Does registries.yaml only apply during bootstrap? (No — configures containerd on NODE. ALL pods, forever.)
 10. What does pullPolicy: IfNotPresent do? (Use cached if available, pull if not. Safe default for air-gap.)
+11. How does SIPRNET transfer work? (CDS — government-operated, you hand off bundles, separate GitLab on each side)
+12. What does the air-gap pipeline look like? (Separate GitLab CI inside SIPRNET, deploy stages only, no build)
+13. How does Kapitan handle classification? (Repo stays unclassified, classified secrets injected by Vault at deploy time)
+14. How does one class generate multiple outputs? (Same variables → Helm values + deploy script + Crossplane + pipeline)
+15. Is Nix like Kapitan? (No — Nix builds software reproducibly. Kapitan configures deployments per environment.)
