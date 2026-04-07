@@ -115,6 +115,282 @@ Say: "One command. Common role preps every node in parallel. Server role bootstr
 
 ---
 
+## Deep Dive: Why Each Common Role Task Exists
+
+> Andy could ask "why do you disable swap?" or "what are those kernel modules for?" Know the WHY behind every task.
+
+### Disable Swap — Why K8s Won't Start With It
+
+**What swap is:** When a machine runs out of RAM, the OS moves data from memory to disk (the "swap" partition). This frees up RAM but disk is thousands of times slower than memory.
+
+**Why K8s hates it:** The K8s scheduler assumes it knows exactly how much memory each node has. It schedules pods based on available memory. If swap is on:
+- A pod requests 2Gi memory, scheduler sees 2Gi free, schedules it
+- But 1Gi of that "free" memory is actually swap (disk) — the pod runs 1000x slower for half its memory
+- kubelet can't accurately report memory usage — everything becomes unreliable
+- The pod might not get OOMKilled when it should (swap absorbs the overflow instead of killing the pod)
+
+**Bottom line:** kubelet refuses to start if swap is detected (by default). Even if you force it, memory-based scheduling becomes unreliable. Just turn it off.
+
+**How to explain:** "K8s scheduler relies on accurate memory reporting. Swap makes memory numbers lie — the scheduler thinks there's free RAM but it's actually slow disk. kubelet won't start with swap on. We disable it in the common role so every node is consistent."
+
+### Kernel Modules — br_netfilter and overlay
+
+**br_netfilter — what it does:**
+Linux bridges (how container networking works) normally bypass iptables rules. That means K8s network policies and Service routing (which work via iptables) would be IGNORED by bridged traffic. Loading `br_netfilter` forces bridge traffic through iptables — so K8s networking works correctly.
+
+Without it: pods can talk to each other even when a NetworkPolicy says they shouldn't. Service ClusterIPs might not route properly. Kube-proxy rules get bypassed.
+
+**overlay — what it does:**
+The overlay filesystem is how container images work. A container image is layers stacked on top of each other (base OS layer, app layer, config layer). The overlay driver lets containerd merge these layers into a single filesystem view without copying them. Every running container uses overlay.
+
+Without it: containerd can't efficiently run containers. It would have to copy every layer, using way more disk space and startup time.
+
+**How to explain:** "br_netfilter makes bridge traffic go through iptables — without it, K8s network policies and Service routing don't work on bridged interfaces. overlay is how container image layers get merged into a single filesystem — containerd needs it to run containers efficiently."
+
+### Sysctl Params — What Each One Does
+
+**net.bridge.bridge-nf-call-iptables = 1**
+"Let iptables see bridged IPv4 traffic." Works together with br_netfilter. The module makes it POSSIBLE, this sysctl ENABLES it. Without both, kube-proxy can't route Service traffic through bridges.
+
+**net.bridge.bridge-nf-call-ip6tables = 1**
+Same thing for IPv6. Even if you're not using IPv6, some K8s components check for it.
+
+**net.ipv4.ip_forward = 1**
+"Allow this machine to forward packets between network interfaces." A node receives a packet on eth0 destined for a pod on a different interface (the CNI bridge). Without ip_forward, the kernel drops it — "that's not for me." With it enabled, the kernel routes it to the right interface. Essential for pods on different nodes to communicate.
+
+**How to explain:** "ip_forward lets the node act as a router — forward packets between its physical interface and the container bridge. bridge-nf-call-iptables makes bridge traffic visible to iptables so kube-proxy can route Services. Without these, pod networking breaks."
+
+### Firewall Ports — What Each One Is For
+
+| Port | Protocol | What uses it | What happens if blocked |
+|------|----------|-------------|----------------------|
+| **6443** | TCP | K8s API server | kubectl can't connect. Pods can't register. Nothing works. |
+| **9345** | TCP | RKE2 supervisor | Agent nodes can't JOIN the cluster. New nodes rejected. |
+| **10250** | TCP | kubelet | API server can't read pod metrics. `kubectl logs` and `kubectl exec` fail. |
+| **2379** | TCP | etcd client | API server can't read/write cluster state. Cluster is braindead. |
+| **2380** | TCP | etcd peer | Server nodes can't replicate data between each other. HA breaks. |
+| **8472** | UDP | VXLAN (Canal CNI) | Pod-to-pod traffic across nodes fails. Pods on different nodes can't talk. |
+
+**How to explain:** "Six ports cover the full cluster communication: API server for all control, supervisor for node joins, kubelet for pod management, etcd for state replication, and VXLAN for cross-node pod networking. Block any one and a specific function breaks — we open all in the common role so every node is ready."
+
+---
+
+## Deep Dive: config.yaml — What It Is and What It Contains
+
+**config.yaml is RKE2's configuration file.** It tells the rke2 binary HOW to run — what mode (server vs agent), where to join, what settings to apply. Lives at `/etc/rancher/rke2/config.yaml`.
+
+**For the FIRST server node (bootstraps the cluster):**
+```yaml
+# /etc/rancher/rke2/config.yaml on the FIRST server
+
+cluster-init: true                    # "I am the FIRST node — create a new cluster"
+                                      # This starts etcd, generates CA certs, creates the API server
+                                      # Only ONE node gets this — the others JOIN
+
+token: "my-secret-cluster-token"      # Shared secret — all nodes must have the same token to join
+                                      # From Ansible Vault — never hardcoded
+
+tls-san:                              # Extra hostnames/IPs the API server cert is valid for
+  - "10.0.1.10"                       # This node's IP
+  - "nlb-kubeflow.internal"           # The NLB — so kubectl works via the load balancer
+
+profile: cis-1.23                     # CIS hardening profile — enables security defaults
+                                      # Pod security admission, audit logging, etc.
+
+disable:
+  - rke2-ingress-nginx                # We use Istio for ingress, don't need the default nginx
+```
+
+**For JOINING server nodes (join existing cluster):**
+```yaml
+# /etc/rancher/rke2/config.yaml on server nodes 2 and 3
+
+server: https://10.0.1.10:9345        # URL of the FIRST server — where to join
+                                      # Port 9345 is the RKE2 supervisor port
+
+token: "my-secret-cluster-token"      # Same token as the first node
+
+tls-san:
+  - "10.0.1.11"                       # This node's own IP
+  - "nlb-kubeflow.internal"
+
+profile: cis-1.23
+disable:
+  - rke2-ingress-nginx
+```
+
+**For AGENT (worker) nodes:**
+```yaml
+# /etc/rancher/rke2/config.yaml on worker nodes
+
+server: https://10.0.1.10:9345        # Same — join via first server
+token: "my-secret-cluster-token"
+
+node-label:                            # Labels for scheduling
+  - "workload=gpu"                     # GPU nodes get this label
+  - "nvidia.com/gpu=true"             # Cluster Autoscaler and scheduler use this
+```
+
+**The Ansible template (config.yaml.j2) uses conditionals to generate the RIGHT config per node:**
+```yaml
+{% if rke2_type == 'server' %}
+  {% if inventory_hostname == groups['control_plane'][0] %}
+cluster-init: true                    # FIRST server only
+  {% else %}
+server: {{ rke2_server_url }}         # Other servers join
+  {% endif %}
+{% else %}
+server: {{ rke2_server_url }}         # Workers always join
+{% endif %}
+
+token: {{ rke2_token }}               # From Ansible Vault
+```
+
+One template → three different configs depending on which node it's applied to. That's the power of Jinja2 templating.
+
+---
+
+## Deep Dive: Handlers — How "Notify" Works in Ansible
+
+**The problem handlers solve:**
+You write a task that updates config.yaml. The service needs to restart to pick up the new config. But if config.yaml DIDN'T change (it's already correct), restarting is wasteful and causes downtime.
+
+**How it works mechanically:**
+
+```yaml
+# In tasks/main.yml:
+
+- name: Write RKE2 config
+  template:
+    src: config.yaml.j2
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'
+  notify: restart rke2-server          # ← "IF this file changed, trigger the handler"
+
+
+# In handlers/main.yml:
+
+- name: restart rke2-server            # ← this handler ONLY runs if notified
+  systemd:
+    name: rke2-server
+    state: restarted
+```
+
+**What happens step by step:**
+
+1. Ansible renders config.yaml.j2 with the node's variables
+2. Ansible compares the rendered output to what's currently at `/etc/rancher/rke2/config.yaml`
+3. **If they're IDENTICAL:** task reports "ok" (no change). Handler is NOT triggered. No restart.
+4. **If they're DIFFERENT:** task reports "changed" — writes the new file. Handler IS triggered.
+5. Handlers run at the END of the play (not immediately) — so all config changes happen first, then one restart covers everything
+6. If you have multiple tasks that notify the same handler, the handler runs ONCE — not once per notification
+
+**Why this matters:**
+- First run: config.yaml doesn't exist → written → handler restarts rke2 → service starts with new config
+- Second run (no changes): config.yaml is identical → no write → no restart → zero downtime
+- Update token: config.yaml changes → written → handler restarts → picks up new token
+- **Idempotent:** run the playbook ten times, only get restarts when config ACTUALLY changes
+
+**How to explain:** "Handlers are conditional restarts. The template task checks if config.yaml changed — if it did, it notifies the handler to restart the service. If nothing changed, no restart. That's idempotency: run the playbook repeatedly, only get side effects when something actually needs to change."
+
+---
+
+## Deep Dive: RKE2 Upgrades with Zero Downtime
+
+> Andy will ask: "How do you upgrade K8s versions?" This is critical for a managed on-prem cluster.
+
+### The Upgrade Strategy
+
+**The order matters:** Always upgrade SERVER nodes first (control plane), then AGENT nodes (workers). Never the other way — the API server must be able to speak the newer K8s version before workers upgrade.
+
+**The process (via Ansible):**
+
+```
+1. Update the rke2_version variable in inventory
+   rke2_version: "v1.29.1+rke2r1"   # was v1.28.4+rke2r1
+
+2. Run ansible-playbook site.yml
+   → Common role: no changes (swap already off, ports already open)
+   → Server role (serial: 1):
+     a. Node 1: copies new binary, handler restarts rke2-server
+        - RKE2 detects version mismatch, runs upgrade procedure
+        - API server restarts with new version
+        - etcd stays running (data preserved)
+        - Verify: kubectl get nodes shows node 1 at new version
+     b. Node 2: same process — copies binary, restarts
+     c. Node 3: same process
+     → All 3 servers now at new version
+   → Agent role (parallel or serial based on strategy):
+     a. Cordon node: kubectl cordon gpu-1 (stop scheduling new pods)
+     b. Drain node: kubectl drain gpu-1 (move running pods to other nodes)
+     c. Copy new binary, restart rke2-agent
+     d. Uncordon: kubectl uncordon gpu-1 (allow scheduling again)
+     e. Repeat for each worker
+```
+
+### Why Zero Downtime Works
+
+**Control plane (3 servers):**
+- Serial:1 means one server restarts at a time
+- While server 1 restarts, servers 2 and 3 still have etcd quorum (2 out of 3)
+- API server is behind an NLB — traffic shifts to the other 2 servers during restart
+- After server 1 is back, server 2 restarts, etc.
+- At no point are fewer than 2 servers running — quorum is always maintained
+
+**Workers:**
+- Drain before upgrade: existing pods get rescheduled to OTHER workers
+- If you have 3 workers and drain 1, the other 2 handle the load
+- After upgrade, uncordon — pods can schedule on the upgraded node again
+- If doing serial:1 for workers, only ONE worker is drained at a time — capacity stays high
+
+**What can go wrong:**
+- If you only have ONE worker with GPU and you drain it — GPU pods have nowhere to go. Solution: ensure minimum 2 GPU nodes before upgrading, or accept brief GPU unavailability.
+- If the new version has a breaking change — the first server might fail to start. Solution: test the upgrade on an ephemeral cluster first (8-hour TTL dev cluster). Verify before touching staging/production.
+- If etcd data format changes between versions — RKE2 handles this automatically during upgrade, but you should have an etcd snapshot backup first.
+
+### The Ansible Upgrade Playbook Addition
+
+```yaml
+# In the agent role, add drain/uncordon around the restart:
+
+- name: Cordon node (stop scheduling)
+  command: >
+    /var/lib/rancher/rke2/bin/kubectl cordon {{ inventory_hostname }}
+  delegate_to: "{{ groups['control_plane'][0] }}"   # run kubectl from a server node
+  when: rke2_upgrade | default(false)
+
+- name: Drain node (move pods)
+  command: >
+    /var/lib/rancher/rke2/bin/kubectl drain {{ inventory_hostname }}
+    --ignore-daemonsets --delete-emptydir-data --timeout=120s
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  when: rke2_upgrade | default(false)
+
+# ... copy binary, restart service ...
+
+- name: Uncordon node (allow scheduling)
+  command: >
+    /var/lib/rancher/rke2/bin/kubectl uncordon {{ inventory_hostname }}
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  when: rke2_upgrade | default(false)
+```
+
+### Tradeoffs
+
+**"Why not just restart all workers at once?"**
+"If you restart all workers simultaneously, every pod gets evicted with nowhere to go. Users see downtime. Serial with drain ensures pods always have somewhere to run."
+
+**"How often do you upgrade?"**
+"We followed RKE2's release cadence — roughly monthly for patch versions, quarterly for minor versions. Each upgrade was tested on an ephemeral dev cluster first, then staging, then production. Same pipeline, just a version variable change."
+
+**"What about rollback?"**
+"RKE2 doesn't have a native rollback command like Helm. If the new version fails, you redeploy the old binary — same Ansible playbook, revert the version variable. etcd data is backward-compatible within minor versions. For safety, I took an etcd snapshot before every upgrade: `/var/lib/rancher/rke2/bin/rke2 etcd-snapshot save`. If everything goes wrong, restore the snapshot."
+
+**How to explain to Andy:**
+"Upgrade servers serial:1 — one at a time, NLB shifts traffic, quorum maintained. Then workers: cordon, drain, upgrade, uncordon — one at a time so pods always have somewhere to run. Tested on ephemeral clusters first. etcd snapshot before every upgrade as a safety net. The whole process is a variable change in the Ansible inventory — same playbook, new version string."
+
+---
+
 ## Coaching: How to Present This
 
 ### The DevOps Focus
