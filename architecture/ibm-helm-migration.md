@@ -9,6 +9,48 @@
 
 ---
 
+## HOW TO DRAW — The Question Method (BEFORE State + AFTER State)
+
+> Same approach as Nightwatch: don't memorize boxes. Walk through questions in order. Each question forces you to draw one section.
+
+### BEFORE State — 8 Questions
+
+**"What was the mess I inherited? Walk through the pain."**
+
+| # | Question | What you draw | What you say |
+|---|----------|--------------|-------------|
+| 1 | "Where did all the code and config live?" | Git Repo box (tws-stack-deployment) | "One Git repo for everything — configs, templates, scripts, Makefiles, all jammed together." |
+| 2 | "How were configs managed?" | Config files + values.yaml + Template files → all feed into Gomplate box | "Per-service config files and values.yaml fed into Gomplate — a custom templating engine nobody else uses. Templates had placeholders, Gomplate substituted values. Custom syntax, hard to debug, impossible to hire for." |
+| 3 | "How did you build and deploy?" | Makefile + .mk files → make command (big, central) | "Everything went through make. The Makefile was the single entry point — it triggered subdirectory Makefiles, one per service. make deploy-jira, make deploy-all." |
+| 4 | "What did make actually call?" | make → branches to: Sub-Makefiles, Shell scripts, Python scripts | "Make fanned out to per-service Makefiles, custom shell scripts for deployment glue — sequencing, health checks, cleanup — and Python scripts for config generation and validation. Multiple paths to the same docker commands." |
+| 5 | "How did containers actually run?" | Shell/Python scripts → docker-compose / docker stack deploy | "All those scripts eventually called docker-compose up or docker stack deploy. Five layers of indirection before a container started: Git → Gomplate → Make → Scripts → Docker." |
+| 6 | "What orchestrated the containers?" | Docker Compose files + Docker Swarm + Docker Volumes boxes | "Compose files defined the services — image, ports, volumes, env vars. Swarm orchestrated them — restart on crash, basic multi-node. Volumes persisted data. But no rolling updates, no health checks, no resource limits." |
+| 7 | "What services were running?" | 9 services listed inside a box: Jira, Bitbucket, Confluence, Jenkins, Artifactory, Crowd, Accounts-API, Mailman, HTTPD-UI | "Nine services serving six hundred engineers daily. Mission-critical internal tooling — if Jira went down, nobody filed issues. If Jenkins went down, builds stopped." |
+| 8 | "What were the pain points?" | Write on the side: No rollback, No drift detection, Manual release checklist, Gomplate = custom/brittle, 600+ users at risk | "No rollback — find the commit, revert, re-run make, hope it works. No drift detection — what's running might not match what's in Git. Every release was a multi-hour manual checklist. Five layers of indirection. Six hundred users at risk from one bad deploy." |
+
+**After drawing all 8:** Draw a dotted arrow from the services back up to make labeled "manual monitoring (docker logs)" — shows the painful feedback loop.
+
+---
+
+### AFTER State — 10 Questions
+
+**"What did I build to replace all of that?"**
+
+| # | Question | What you draw | What you say |
+|---|----------|--------------|-------------|
+| 1 | "Where does code live now?" | Git Repo (Bitbucket — same repo) | "Same Git repo, but now it holds Helm charts instead of Makefiles and Gomplate templates." |
+| 2 | "How are configs managed now?" | Helm Charts box with: Application charts (one per service), Shared library chart, values.yaml per environment (dev/test/prod) | "Helm charts for all nine services. values.yaml per environment — dev gets small replicas and dev database, prod gets HA replicas and prod database. Shared library chart has common patterns — health checks, resource limits, labels — so every chart inherits the same standards." |
+| 3 | "How do you deploy now?" | CI/CD Pipeline box: Build image → SonarQube scan → Helm lint → Helm template → Helm package → Deploy | "CI/CD pipeline triggered on git push. Builds the image, scans with SonarQube, lints the chart, renders templates to catch errors, packages into a versioned archive, deploys. All automated — no SSH, no manual make." |
+| 4 | "What does each service look like in K8s?" | Inside K8s Cluster box, draw ONE service (Jira) with: Deployment (image, replicas, resource limits, probes), Service (ClusterIP, DNS name), ConfigMap (non-sensitive config), Secret (passwords), PVC → PV (persistent storage) | "Each service became the same K8s pattern. Deployment for the workload with liveness and readiness probes — Swarm never had those. Service for stable DNS name — replaces Compose depends_on. ConfigMap for config, Secret for passwords, PVC for persistent storage with Retain policy." |
+| 5 | "How do services find each other?" | Label on Service box: "stable DNS: jira.default.svc.cluster.local" | "K8s services get automatic DNS names. Jira calls postgres-jira by name, K8s resolves it. No hardcoded IPs. If postgres restarts on a different node, DNS still works because Service tracks pods by label, not IP." |
+| 6 | "How do you handle persistent data?" | PVC → PV with labels: StorageClass, Retain/Delete policy | "PVCs request storage — fifty gig for Jira, hundred gig for Bitbucket repos. StorageClass auto-provisions. Retain policy for production databases — data survives pod restart. Delete for test environments." |
+| 7 | "Where do developers test locally?" | Developer Local Environment box: Git clone, Docker Desktop/Minikube, Helm, kubectl | "Developers run Docker Desktop or Minikube locally — single-node K8s. Helm install their chart, test locally with kubectl, then push to Git. CI/CD handles the rest." |
+| 8 | "How do you promote between environments?" | Dev Cluster → Test Cluster → Production boxes with arrows | "Pipeline auto-deploys to dev on push. Tests pass → promote to test cluster with values-test.yaml. Validated → promote to production with values-prod.yaml. Each promotion is one helm upgrade command." |
+| 9 | "How do you roll back?" | Dotted arrow from Production back to pipeline labeled "helm rollback" | "helm rollback jira 3 — reverts to revision three instantly. Helm stores every release as a numbered revision. No finding commits, no re-running make. One command." |
+| 10 | "What's the result?" | Write metrics: 40% release prep reduction, 35% build failure reduction, 99.9% reliability, zero downtime during migration | "Release prep cut forty percent — from hours to minutes. Build failures down thirty-five percent with automated pipeline. Ninety-nine point nine percent reliability for eight mission apps. Six hundred users never experienced downtime during the entire migration." |
+
+---
+
 ## GAPS — Review This Before Each Drawing Attempt
 
 > These are the things you missed on your first attempt. Read this section FIRST before redrawing. Once you nail all of these, remove them from this list.
