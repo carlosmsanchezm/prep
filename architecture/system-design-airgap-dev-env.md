@@ -13,21 +13,22 @@
 
 | # | Question | What you draw | What you say |
 |---|----------|--------------|-------------|
-| 1 | "How do I physically get in and get on the network?" | Badge box (physical access), Laptop box (hardened RHEL, encrypted, pre-loaded tools), VPN/cert auth box (connects to isolated VLAN) | "Badge gets me in the building. Laptop is a hardened RHEL box — STIG'd, encrypted disk, pre-loaded with Git, Podman, Ansible, VS Code, SSH keys. I connect to the internal network via VPN with cert-based auth. No internet — isolated VLAN." |
-| 2 | "How does my laptop find services on this network?" | Internal DNS box (resolves gitlab.dev.internal, nexus.dev.internal, vault.dev.internal), NTP box (local time — can't reach pool.ntp.org), DHCP box | "Internal DNS — resolves all service hostnames locally. Internal NTP because air-gapped can't reach public time servers — clocks need to sync for TLS, logging, and Kerberos. DHCP or static IP assignment for the VLAN." |
-| 3 | "Where does the source code live?" | GitLab CE box: repos, MRs, issue tracking, built-in container registry | "Local GitLab CE — self-hosted, no github.com. Source code, merge request reviews, issue tracking. Built-in container registry so we don't need a separate one for images built by the pipeline. Everything stays internal." |
-| 4 | "How do I install packages and pull container images?" | Nexus box with 3 sub-sections: Docker registry (pre-mirrored images), Package repos (PyPI, RPM, npm, Go), Helm repo | "Can't pip install from PyPI or dnf install from the internet. Nexus Repository Manager mirrors everything — Python packages, RHEL RPMs, npm modules, Go module proxy, container images, Helm charts. All pre-transferred from the connected side. One tool handles ALL package types." |
-| 5 | "How do packages GET into this air-gapped network?" | Transfer flow: Connected side → Bundle station (pull + scan + checksum) → Approved media (diode/USB/CDS) → Receiving station → unpacks into Nexus | "On the connected side, a bundle station pulls packages and images, scans with Trivy, generates a manifest with checksums, packages into an archive. Transfer via diode or approved media — one-way, hardware-enforced. On the air-gapped side, a receiving station validates checksums, unpacks into Nexus repos. Automated, auditable, every transfer logged." |
-| 6 | "What happens when I push code?" | GitLab Runner box: Podman executor (rootless), pipeline stages: lint → build → scan → test → push artifact | "GitLab Runner with a Podman executor — rootless, pulls images from Nexus. Push triggers the pipeline: lint the code, build the container image, scan with SonarQube for vulnerabilities, test by running Ansible against a test VM, push passing artifacts to Nexus. All automated, no manual steps." |
-| 7 | "How does the pipeline test Ansible deployments?" | Test VM/container box: Ansible deploys playbooks here, validates configs before production | "Test targets — EC2 instances or local VMs inside the air-gapped network. The pipeline runs ansible-lint first, then actually deploys the playbook to the test target. If it fails, pipeline fails — blocked before production. Vault provides SSH certs so the runner can reach the test VMs securely." |
-| 8 | "How do I log in to everything?" | Keycloak box: OIDC/SSO for GitLab, Nexus, Grafana, Vault. Badge-linked identity. | "Keycloak for single sign-on. One login for everything — GitLab, Nexus, Grafana, Vault. Badge-linked identity if we're integrating with CAC or physical badge systems. No managing separate credentials per tool." |
-| 9 | "Where do secrets live?" | Vault box: secrets management, SSH cert signing, pipeline credentials, database passwords. Arrow: Vault → Runner (pipeline secrets), Vault → Test VMs (SSH certs) | "HashiCorp Vault. Secrets management — database passwords, API keys, pipeline credentials. SSH certificate signing — Ansible needs certs to reach test VMs, Vault issues short-lived certs per pipeline run. No hardcoded secrets anywhere — no .env files, no plain text in Git." |
-| 10 | "How do I know if something is broken?" | Prometheus + Grafana + Loki box. Arrows from all services → Prometheus. | "Prometheus scrapes metrics from every service — GitLab, runners, Nexus, test VMs. Grafana for dashboards: pipeline success rates, runner utilization, disk space. Loki for centralized log aggregation — if a build fails, I search Loki instead of SSH'ing to the runner. All internal, zero internet." |
-| 11 | "How do I build container images?" | Podman build host box: rootless builds, Trivy offline scanning, push to Nexus registry | "Podman for container builds — rootless by default, no daemon, SELinux compatible. Build the image, scan with Trivy offline, push to Nexus Docker registry. If I'm on my laptop, same thing: podman build locally, push to Nexus when ready." |
-| 12 | "Where do shared files and build caches go?" | NFS / shared storage box: artifacts, build caches, datasets, Git LFS backend | "NFS for shared storage — build caches so the runner doesn't re-download dependencies every run, shared datasets if teams need common test data, Git LFS backend for large files. Mounted by GitLab and the runner." |
+| 1 | "How do I get in and get on the network?" | Badge box, Laptop box (hardened RHEL, pre-loaded tools), cert auth → isolated VLAN | "Badge gets me in. Laptop is a hardened RHEL box — STIG'd, encrypted disk, pre-loaded with Git, Podman, Ansible, VS Code, SSH keys. Cert-based auth joins me to the air-gapped VLAN. No internet." |
+| 2 | "How does my laptop find services?" | Internal DNS (gitlab.dev.internal, nexus.dev.internal), NTP (local time — TLS needs synced clocks) | "Internal DNS resolves all services locally. Internal NTP because air-gapped can't reach public time servers — clocks must sync for TLS cert validation and log correlation." |
+| 3 | "What runs all the dev services?" | K8s cluster box (RKE2) inside the air-gapped network. Label: "All services run as pods, deployed via Helm charts, managed by ArgoCD" | "Everything runs on Kubernetes — RKE2 cluster inside the air-gapped network. Every service is a pod deployed via Helm charts stored in Nexus. ArgoCD syncs from a local Git repo — same GitOps pattern I used at NTConcepts and VivSoft." |
+| 4 | "Where does source code live?" | Inside K8s: GitLab pods — gitlab-webservice, gitaly (Git storage), gitlab-registry (built-in container registry), gitlab-runner | "GitLab CE runs as K8s pods. Webservice handles the UI and API. Gitaly is the Git storage backend — handles all git operations, stores repos on a PVC. Built-in container registry for images built by the pipeline. Runner pod with Podman executor runs CI/CD jobs." |
+| 5 | "How do I install packages and pull images?" | Inside K8s: Nexus pod — Docker registry, PyPI, RPM, npm, Helm repos all in one | "Nexus runs as a pod with a large PVC. One tool mirrors everything — container images from Iron Bank, Python packages, RHEL RPMs, npm, Go modules, Helm charts. All pre-transferred from the connected side. Developers point pip, dnf, and podman at Nexus — works like the public internet but local." |
+| 6 | "How do packages GET into the air-gap?" | Connected side box (OUTSIDE air-gap) → Diode/media (one-way, on the boundary) → Receiving station box (INSIDE air-gap) → unpacks into Nexus | "Connected side: bundle station pulls from internet, scans with Trivy, packages into Zarf archives with checksums. Transfers via diode — hardware-enforced one-way. Receiving station is INSIDE the air-gapped network: validates checksums, unpacks images and packages into Nexus. Auditable — every transfer logged." |
+| 7 | "What happens when I push code?" | Arrow: git push → GitLab → triggers Runner → pipeline: lint → build → SonarQube scan → Ansible deploy to test VM → push artifact to Nexus | "Push triggers the pipeline on the runner pod. Lint, build container with Podman, scan with SonarQube for code quality and vulnerabilities, deploy via Ansible to a test VM to validate, push passing artifact to Nexus. All automated." |
+| 8 | "How do I log in to everything?" | Keycloak pod: OIDC/SSO → GitLab, Nexus, Grafana, Vault | "Keycloak pod — SSO for everything. One login. GitLab, Nexus, Grafana, Vault all integrated. Badge-linked identity if we integrate with CAC. No separate credentials per tool." |
+| 9 | "Where do secrets live?" | Vault pod (Raft HA): SSH certs → test VMs, pipeline creds → runner | "Vault runs as a StatefulSet with Raft HA. SSH cert signing — Ansible gets short-lived certs per pipeline run to reach test VMs. Pipeline credentials, database passwords, API keys — all in Vault, never in Git." |
+| 10 | "How is traffic secured inside the cluster?" | Istio pod: mTLS pod-to-pod, ingress gateway. cert-manager + step-ca: internal PKI | "Istio service mesh — mTLS between all pods automatically. cert-manager with step-ca as the internal CA — can't use Let's Encrypt air-gapped. Issues and rotates TLS certs for the ingress gateway and Keycloak." |
+| 11 | "How do I know if something is broken?" | Prometheus + Grafana + Loki pods. Arrows: scrapes GitLab, Runner, Nexus | "Prometheus scrapes every service, Grafana for dashboards, Loki for logs. Pipeline success rates, runner utilization, Nexus disk usage — all visible without SSH'ing to anything." |
+| 12 | "Where does data persist?" | PostgreSQL StatefulSet (GitLab DB, Keycloak DB, SonarQube DB). NFS for Gitaly repos, build caches, artifacts | "PostgreSQL as a StatefulSet — databases for GitLab, Keycloak, SonarQube. PVCs with Retain policy for production. NFS for Git repos via Gitaly, build caches for the runner, shared artifacts. Data survives pod restarts." |
 
-**After all 12:** Write the summary metrics and narrate:
-"The whole thing runs air-gapped. Software enters through the transfer process — approved, scanned, checksummed. Developers work locally: clone, code, build with Podman, test with Ansible, push to GitLab, pipeline validates, artifact lands in Nexus. No internet needed at any step."
+**After all 12:** Add ArgoCD arrow: "ArgoCD deploys ALL of these services from a local Git repo via Helm charts stored in Nexus. Same GitOps pattern as my VivSoft and NTConcepts platforms — push manifests to Git, ArgoCD syncs."
+
+Then narrate: "The whole thing runs air-gapped on K8s. Every service is a pod — GitLab, Nexus, Vault, Keycloak, monitoring, all deployed via Helm. Software enters through the transfer process — scanned, checksummed, one-way. Developers clone, code, build with Podman, push to GitLab, pipeline validates, artifact lands in Nexus. No internet at any step. And because it's K8s with ArgoCD, the whole environment is reproducible from Git — I can spin up a second environment by deploying the same Helm charts."
 
 ---
 
@@ -51,139 +52,171 @@ config:
 ---
 flowchart TD
     subgraph Physical_Access["Physical Access & Onboarding"]
-        Badge["Badge<br/>(physical access to building + SCIF)"]:::physical
-        Laptop["Hardened Laptop<br/>RHEL 8/9 · STIG'd · encrypted disk<br/>no USB unless approved<br/>pre-loaded with: Git, Podman, Ansible,<br/>IDE (VS Code), SSH keys"]:::physical
-        VPN["Internal VPN / Network Access<br/>(badge + cert-based auth)<br/>connects to air-gapped VLAN"]:::physical
+        Badge["Badge<br/>(physical access to building)"]:::physical
+        Laptop["Hardened Laptop<br/>RHEL 8/9 · STIG'd · encrypted disk<br/>pre-loaded: Git, Podman, Ansible,<br/>VS Code, SSH keys"]:::physical
+        VPN["Internal Network Access<br/>(badge + cert-based auth)<br/>connects to air-gapped VLAN"]:::physical
+    end
+
+    subgraph Connected_Side["Connected Side (HAS internet — separate network)"]
+        Bundle["Bundle Station<br/>- Pull packages: RPM, PyPI, npm, Go<br/>- Pull images: Iron Bank, base images<br/>- Scan everything with Trivy<br/>- Package into Zarf archive<br/>- Generate manifest + checksums"]:::transfer
+    end
+
+    subgraph Transfer["Transfer Boundary (one-way)"]
+        Media["Diode / Approved Media<br/>(hardware-enforced one-way)<br/>data flows IN only"]:::transfer
     end
 
     subgraph AirGapped_Network["Air-Gapped Network (no internet — isolated VLAN)"]
         direction TB
 
-        subgraph DNS_NTP["Core Network Services"]
-            DNS["Internal DNS Server<br/>resolves: gitlab.dev.internal<br/>nexus.dev.internal<br/>vault.dev.internal"]:::network
-            NTP["Internal NTP Server<br/>(air-gapped can't reach<br/>pool.ntp.org — need local)"]:::network
-            DHCP["DHCP / Static IP Assignment<br/>(laptop gets IP on internal VLAN)"]:::network
+        subgraph Network_Services["Core Network Services (bare-metal or VM)"]
+            DNS["Internal DNS<br/>gitlab.dev.internal<br/>nexus.dev.internal<br/>vault.dev.internal"]:::network
+            NTP["Internal NTP<br/>(local time source)"]:::network
         end
 
-        subgraph Dev_Services["Developer Services (all local — no internet)"]
+        subgraph Receive_Station["Receiving Station (inside air-gap)"]
+            Receive["Receive + Validate<br/>- Validate checksums (sha256)<br/>- Unpack archives<br/>- Push images → Nexus Docker<br/>- Push packages → Nexus repos<br/>- Log every transfer for audit"]:::transfer
+        end
+
+        subgraph K8s_Cluster["Kubernetes Cluster (RKE2 — all services run as pods)"]
             direction TB
 
-            subgraph GitLab_Stack["GitLab CE (Self-Hosted)"]
-                GitLab["GitLab CE Server<br/>- Source code repos<br/>- Merge request reviews<br/>- Issue tracking<br/>- Container registry (built-in)"]:::service
-                Runner["GitLab Runner<br/>- Podman executor (rootless)<br/>- Runs CI/CD pipelines<br/>- Pulls images from Nexus<br/>- Ansible jobs via runner"]:::service
+            subgraph Infra_Services["Infrastructure Services (deployed via Helm + ArgoCD)"]
+                ArgoCD_Dev["ArgoCD<br/>GitOps — syncs all services<br/>from local Git repo"]:::gitops
+                Istio_Dev["Istio<br/>service mesh + ingress<br/>mTLS pod-to-pod"]:::k8s
+                CertMgr_Dev["cert-manager + step-ca<br/>internal PKI (air-gap CA)"]:::k8s
             end
 
-            subgraph Registry_Stack["Nexus Repository Manager"]
-                Nexus_Docker["Nexus Docker Registry<br/>- Container images (pre-mirrored)<br/>- RHEL base, Python, Node, Go<br/>- Iron Bank images if DoD"]:::service
-                Nexus_Pkg["Nexus Package Repos<br/>- PyPI mirror (Python packages)<br/>- RPM mirror (RHEL packages)<br/>- npm mirror (Node packages)<br/>- Go module proxy"]:::service
-                Nexus_Helm["Nexus Helm Repo<br/>- Helm charts for internal tools<br/>- Versioned, signed"]:::service
+            subgraph Dev_Tools["Developer Tools (K8s pods — deployed via Helm charts from Nexus)"]
+                subgraph GitLab_Pods["GitLab CE"]
+                    GitLab["gitlab-webservice pod<br/>- Source code repos<br/>- Merge requests<br/>- Issue tracking"]:::service
+                    Gitaly["gitaly pod<br/>- Git storage backend<br/>- Handles git operations"]:::service
+                    GitLab_Registry["gitlab-registry pod<br/>- Built-in container registry"]:::service
+                    Runner["gitlab-runner pod<br/>- Podman executor (rootless)<br/>- Runs CI/CD pipelines"]:::service
+                end
+
+                subgraph Nexus_Pods["Nexus Repository Manager"]
+                    Nexus["nexus pod<br/>- Docker registry (pre-mirrored images)<br/>- PyPI mirror (Python)<br/>- RPM mirror (RHEL)<br/>- npm mirror (Node)<br/>- Helm chart repo"]:::service
+                end
+
+                subgraph Security_Pods["Security & Identity"]
+                    Vault["vault pod (Raft HA)<br/>- Secrets management<br/>- SSH cert signing<br/>- Pipeline credentials"]:::service
+                    Keycloak["keycloak pod<br/>- OIDC/SSO for all services<br/>- Badge-linked identity"]:::service
+                    SonarQube["sonarqube pod<br/>- Static code analysis<br/>- Quality gates in pipeline"]:::service
+                end
+
+                subgraph Monitoring_Pods["Observability"]
+                    Prometheus["prometheus pod<br/>- Metrics from all services"]:::service
+                    Grafana["grafana pod<br/>- Dashboards"]:::service
+                    Loki["loki pod<br/>- Centralized logs"]:::service
+                end
             end
 
-            subgraph Security_Stack["Security & Identity"]
-                Vault["HashiCorp Vault<br/>- Secrets management<br/>- SSH cert signing<br/>- Database credentials<br/>- API keys"]:::service
-                Keycloak["Keycloak (OIDC/SSO)<br/>- Single sign-on for all services<br/>- GitLab, Nexus, Vault, Grafana<br/>- Badge-linked identity"]:::service
-                SonarQube["SonarQube<br/>- Static code analysis<br/>- Security vulnerability scanning<br/>- Quality gates in pipeline"]:::service
-            end
-
-            subgraph Monitoring_Stack["Observability"]
-                Prometheus["Prometheus<br/>- Metrics from all services<br/>- Runner utilization<br/>- Disk/CPU/memory alerts"]:::service
-                Grafana["Grafana<br/>- Dashboards for devs + ops<br/>- Pipeline success rates<br/>- Resource utilization"]:::service
-                Loki["Loki<br/>- Centralized log aggregation<br/>- GitLab logs, runner logs,<br/>  Ansible output logs"]:::service
+            subgraph Data_Layer["Persistent Data (PVCs → PVs)"]
+                PG["PostgreSQL<br/>(StatefulSet)<br/>- GitLab DB<br/>- Keycloak DB<br/>- SonarQube DB"]:::data
+                NFS["NFS / EFS<br/>- Git repos (Gitaly)<br/>- Build caches<br/>- Shared artifacts"]:::data
             end
         end
 
-        subgraph Build_Test["Build & Test Infrastructure"]
-            direction LR
-            TestVM["Test Target VMs / Containers<br/>- EC2 instances or local VMs<br/>- Ansible deploys playbooks here<br/>- Validates configs before prod"]:::infra
-            PodmanHost["Podman Build Host<br/>- Rootless container builds<br/>- Image scanning (Trivy offline)<br/>- Push to Nexus Docker registry"]:::infra
-        end
-
-        subgraph Storage["Shared Storage"]
-            NFS["NFS / Shared Storage<br/>- Artifact storage<br/>- Build caches<br/>- Shared datasets<br/>- Git LFS backend"]:::infra
+        subgraph Test_Targets["Test Infrastructure (outside cluster)"]
+            TestVM["Test VMs / EC2 instances<br/>- Ansible deploys here<br/>- Validates playbooks<br/>- before production"]:::infra
         end
     end
 
-    subgraph Transfer_Layer["Package Transfer (how software gets INTO the air-gap)"]
-        direction TB
-        Connected["Connected Side<br/>(has internet)"]:::transfer
-        Bundle["Bundle Station<br/>- Pull packages: RPM, PyPI, npm, Go<br/>- Pull images: Iron Bank, base images<br/>- Scan everything with Trivy<br/>- Package into transfer archive<br/>- Generate manifest + checksums"]:::transfer
-        Media["Approved Transfer Media<br/>- Diode (one-way hardware)<br/>- Encrypted USB (if approved)<br/>- Cross-domain solution<br/>- Checksum verified on both sides"]:::transfer
-        Receive["Receiving Station<br/>- Validate checksums<br/>- Unpack into Nexus repos<br/>- Update package indexes<br/>- Log every transfer for audit"]:::transfer
-    end
-
-    %% Developer workflow
+    %% Developer Day 1 flow
     Developer["Developer<br/>(Day 1)"]:::user
-    Developer -- "1. Badge in<br/>get physical access" --> Badge
-    Developer -- "2. Boot laptop<br/>connect to internal network" --> Laptop
-    Laptop -- "3. VPN/cert auth<br/>join air-gapped VLAN" --> VPN
+    Developer -- "1. Badge in" --> Badge
+    Developer -- "2. Boot laptop" --> Laptop
+    Laptop -- "3. Cert auth →<br/>join air-gapped VLAN" --> VPN
     VPN -- "4. DNS resolves<br/>gitlab.dev.internal" --> DNS
 
-    %% Daily developer flow
-    Developer -- "5. git clone<br/>from local GitLab" --> GitLab
-    Developer -- "6. Write code locally<br/>on laptop" --> Laptop
-    Developer -- "7. podman build<br/>using Nexus images" --> Nexus_Docker
-    Developer -- "8. pip install / dnf install<br/>from Nexus mirrors" --> Nexus_Pkg
-    Developer -- "9. git push<br/>triggers pipeline" --> GitLab
+    %% Developer daily flow
+    Developer -- "5. git clone" --> GitLab
+    Developer -- "6. podman build<br/>(images from Nexus)" --> Nexus
+    Developer -- "7. pip install / dnf install<br/>(packages from Nexus)" --> Nexus
+    Developer -- "8. git push →<br/>triggers pipeline" --> GitLab
 
     %% Pipeline flow
     GitLab -- "triggers" --> Runner
-    Runner -- "pulls base images" --> Nexus_Docker
-    Runner -- "runs ansible-lint<br/>+ ansible-playbook" --> TestVM
-    Runner -- "runs SonarQube scan" --> SonarQube
-    Runner -- "on success: pushes<br/>artifact to Nexus" --> Nexus_Docker
+    Runner -- "pulls images" --> Nexus
+    Runner -- "ansible-lint +<br/>ansible-playbook" --> TestVM
+    Runner -- "sonarqube scan" --> SonarQube
+    Runner -- "on success:<br/>push artifact" --> Nexus
+
+    %% GitLab internal
+    GitLab -- "git operations" --> Gitaly
+    GitLab -- "image storage" --> GitLab_Registry
+
+    %% ArgoCD deploys everything
+    ArgoCD_Dev -. "deploys all Helm charts<br/>from local Git repo" .-> Dev_Tools
+    ArgoCD_Dev -. "syncs infra services" .-> Infra_Services
 
     %% SSO
-    Keycloak -- "SSO for" --> GitLab
-    Keycloak -- "SSO for" --> Nexus_Docker
-    Keycloak -- "SSO for" --> Grafana
-    Keycloak -- "SSO for" --> Vault
+    Keycloak -- "SSO" --> GitLab
+    Keycloak -- "SSO" --> Nexus
+    Keycloak -- "SSO" --> Grafana
+    Keycloak -- "SSO" --> Vault
 
     %% Secrets
-    Vault -- "SSH certs for<br/>Ansible → test VMs" --> TestVM
-    Vault -- "pipeline secrets<br/>(registry creds, API keys)" --> Runner
+    Vault -- "SSH certs for Ansible" --> TestVM
+    Vault -- "pipeline secrets" --> Runner
+
+    %% TLS
+    CertMgr_Dev -- "issues TLS certs" --> Istio_Dev
+    CertMgr_Dev -- "issues TLS certs" --> Keycloak
 
     %% Monitoring
     Prometheus -- "scrapes" --> GitLab
     Prometheus -- "scrapes" --> Runner
-    Prometheus -- "scrapes" --> Nexus_Docker
-    Prometheus -- "scrapes" --> TestVM
+    Prometheus -- "scrapes" --> Nexus
     Grafana -- "reads" --> Prometheus
     Grafana -- "reads" --> Loki
 
-    %% Storage
-    NFS -- "shared artifacts" --> GitLab
-    NFS -- "build cache" --> Runner
+    %% Data persistence
+    GitLab -- "DB" --> PG
+    Keycloak -- "DB" --> PG
+    SonarQube -- "DB" --> PG
+    Gitaly -- "storage" --> NFS
+    Runner -- "build cache" --> NFS
 
-    %% Transfer flow (how packages get in)
-    Connected -- "pulls from internet" --> Bundle
-    Bundle -- "transfers via" --> Media
-    Media -- "delivers to" --> Receive
-    Receive -- "unpacks into" --> Nexus_Pkg
-    Receive -- "unpacks into" --> Nexus_Docker
+    %% Transfer flow (shows physical placement)
+    Bundle -- "packages archives<br/>via one-way" --> Media
+    Media -- "delivers INTO<br/>air-gapped network" --> Receive
+    Receive -- "unpacks images<br/>into Nexus" --> Nexus
+    Receive -- "unpacks packages<br/>into Nexus" --> Nexus
+
+    %% Ingress
+    Istio_Dev -- "routes external<br/>traffic to services" --> Dev_Tools
 
     classDef physical fill:#d4edda,stroke:#155724,stroke-width:2px
     classDef network fill:#fce4ec,stroke:#c62828,stroke-width:2px
     classDef service fill:#cce5ff,stroke:#004085,stroke-width:2px
+    classDef k8s fill:#f8d7da,stroke:#721c24,stroke-width:2px
+    classDef gitops fill:#cce5ff,stroke:#004085,stroke-width:3px
     classDef infra fill:#fff3cd,stroke:#856404,stroke-width:2px
     classDef transfer fill:#e2e3e5,stroke:#383d41,stroke-width:2px
     classDef user fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    classDef data fill:#d4edda,stroke:#155724,stroke-width:2px
 ```
 
 ### Design Narration (how to walk Taylor through it)
 
-**"Day one. I badge in, boot my laptop — it's a hardened RHEL box, pre-loaded with Git, Podman, Ansible, and an IDE. I connect to the internal network via VPN with cert-based auth. No internet — I'm on an isolated VLAN.**
+**"Day one. Badge in, boot the laptop — hardened RHEL, pre-loaded tools. Cert auth to join the air-gapped VLAN. No internet.**
 
-**First thing I need: code. Local GitLab CE — I clone repos, create branches, push MRs. No github.com.**
+**Everything runs on a K8s cluster inside the air-gapped network — same pattern I used at NTConcepts and VivSoft. Every service is a pod deployed via Helm charts managed by ArgoCD.**
 
-**Second: packages. I can't pip install from PyPI or dnf install from the internet. Nexus Repository Manager mirrors everything — Python packages, RPM repos, npm, Go modules, container images. All pre-transferred from the connected side via an approved transfer process: bundle on the connected side, scan with Trivy, verify checksums, transfer via diode or approved media, unpack into Nexus.**
+**Source code: GitLab CE — webservice pod for the UI, gitaly pod for Git storage, built-in registry pod for container images, runner pod for CI/CD. All running in the cluster, all backed by PostgreSQL StatefulSets and NFS for persistent storage.**
 
-**Third: CI/CD. GitLab Runner with a Podman executor — rootless, pulls images from Nexus. When I push code, the pipeline runs: lint, build containers, scan with SonarQube, test by deploying Ansible playbooks to test VMs, push passing artifacts to Nexus.**
+**Packages: Nexus pod mirrors everything — container images, Python, RPM, npm, Go, Helm charts. One tool, all package types. Developers point their package managers at Nexus — works like the public internet but fully local.**
 
-**Fourth: security. Keycloak for SSO across everything — GitLab, Nexus, Grafana, Vault. One login. Vault handles secrets: SSH certs for Ansible to reach test VMs, pipeline credentials, database passwords. No hardcoded secrets anywhere.**
+**How packages get in: on the connected side, a bundle station pulls from the internet, scans with Trivy, packages into Zarf-style archives with checksums. Transfer via diode — one-way hardware into the air-gap. Receiving station INSIDE the network validates checksums and unpacks into Nexus. Auditable, automated.**
 
-**Fifth: observability. Prometheus scrapes metrics from all services, Grafana for dashboards, Loki for centralized logs. I can see if the runner is overloaded, if builds are failing, if Nexus is running out of disk.**
+**Pipeline: push code to GitLab → runner triggers → lint, build with Podman, scan with SonarQube, test by deploying Ansible to a test VM, push passing artifact to Nexus. All automated — no manual steps.**
 
-**The whole thing runs air-gapped. Software enters through the transfer process — approved, scanned, checksummed. Developers work locally: clone, code, build with Podman, test with Ansible, push to GitLab, pipeline validates, artifact lands in Nexus. No internet needed at any step."**
+**Security: Keycloak pod for SSO — one login for everything. Vault pod in Raft HA for secrets — SSH certs, pipeline credentials, database passwords. Istio mesh for mTLS between pods. cert-manager with step-ca as the internal CA for TLS certificates.**
+
+**Observability: Prometheus, Grafana, Loki — all pods inside the cluster. Zero internet. Full visibility into pipeline health, runner utilization, service status.**
+
+**The whole environment is reproducible from Git — ArgoCD syncs everything. Need a second environment? Deploy the same Helm charts to a new cluster. Need to update a service? Push to Git, ArgoCD syncs. Drift? ArgoCD detects and reverts. Same GitOps pattern I've built twice before."**
 
 ### Architectural Decisions / Tradeoffs Andy or Taylor Might Probe
 
