@@ -300,6 +300,65 @@ For JCRS-E:
 
 ---
 
+## 7. "Why Not Use Official Helm Charts for Jira/Bitbucket?"
+
+Andy might ask: "Why write custom charts? Didn't Atlassian have Helm charts?"
+
+**Answer:** "Three reasons. First, Atlassian didn't have official Helm charts when we did the migration — they came later. Second, even if they existed, we couldn't pull from a public Helm repository — air-gapped, everything from internal sources. Third, the existing Docker Compose files had years of accumulated configuration: custom plugins, SSO integration with Crowd, proxy settings, database connection tuning, specific volume mounts. An off-the-shelf chart wouldn't know about any of that. I wrote custom charts that TRANSLATED the existing proven config into Helm templates — same logic, new format. The images came from our internal registry, mirrored from the vendor."
+
+---
+
+## 8. The 8 Environments at VivSoft — What Are They?
+
+| # | Environment | Level | Lifetime | Purpose |
+|---|-------------|-------|----------|---------|
+| 1 | Shared Dev | Unclassified | Persistent | Always running — developers test daily |
+| 2-3 | Ephemeral Dev (x2+) | Unclassified | 8-hour TTL | Per-developer/feature — auto-destroys |
+| 4 | Staging Left | Unclassified | Persistent | Pre-production full-stack validation |
+| 5 | Staging Right | Unclassified | Persistent | Alternate staging — parallel release testing |
+| 6 | Production | Unclassified | Persistent | Live — mission app teams use daily |
+| 7 | SIPRNET Staging | Classified | Persistent | Pre-production for classified workloads |
+| 8 | SIPRNET Production | Classified | Persistent | Live classified — USCYBERCOM operational |
+
+**Why left AND right staging?** Test two releases in parallel. Release A on left, release B on right — no blocking.
+
+**Why ephemerals?** Full production-equivalent cluster for 8 hours. Test, auto-destroy. No orphan resources.
+
+**Why this matters:** All 8 environments from the SAME Kapitan templates — just different target files. One change propagates to all 8.
+
+---
+
+## 9. registries.yaml — Node-Level, Not Just Bootstrap
+
+**Misconception:** registries.yaml only matters during RKE2 bootstrap.
+
+**Reality:** registries.yaml configures **containerd** — the container runtime on the node. Affects ALL image pulls on that node, forever.
+
+```
+Pod says: image: docker.io/nginx:latest
+containerd reads registries.yaml: "docker.io mirrors to ecr.local"
+containerd pulls from ecr.local instead — PRIVATE, no internet
+```
+
+- Applies to EVERY pod on the node — bootstrap, ArgoCD, Istio, your apps, everything
+- Per-NODE, not per-pod. Set once, all containers redirect.
+- Pod spec doesn't change — devs don't know it's air-gapped. containerd handles it transparently.
+- Without it, you'd rewrite every image reference in every manifest — hundreds of changes.
+
+---
+
+## 10. Image Pull Policies
+
+| Policy | What it does | When to use |
+|--------|-------------|-------------|
+| **IfNotPresent** | Already cached on node? → use it. Not cached? → pull. | Default for tagged images. Air-gap safe: first pull from mirror, then cached. |
+| **Always** | Always check registry, even if cached. | For `:latest`. Risky in air-gap if mirror unreachable. |
+| **Never** | Never pull. Use only cached. If missing → pod fails. | Pre-loaded images (Zarf pushes before pods start). |
+
+`IfNotPresent` is the safe air-gap default. Bundle pushes images to mirror → first pod pull caches on node → subsequent pods use cache. Fast, no network after first pull.
+
+---
+
 ## Quick Test — Can You Explain Each Concept?
 
 Close this file and answer these aloud. If you can't, re-read the section.
@@ -309,4 +368,8 @@ Close this file and answer these aloud. If you can't, re-read the section.
 3. What's the difference between Kustomize and Kapitan? (patches vs inheritance — give the "change Vault port" example)
 4. What's a VPC endpoint? (private door to AWS service, no internet needed)
 5. How big was your cluster? (20+ services, 30-50 pods, 4 programs — complex, not massive)
-6. Did you use a diode? (No — used S3 + VPC endpoints. Anduril uses a physical diode. Same concept, different transfer mechanism.)
+6. Did you use a diode? (No — S3 + VPC endpoints. Anduril uses diode. Same concept, different transfer.)
+7. Why custom Helm charts instead of official ones? (Atlassian didn't have them, air-gapped, years of custom config in Compose files)
+8. What are the 8 environments? (shared dev, ephemerals, staging left/right, production, SIPRNET staging/prod)
+9. Does registries.yaml only apply during bootstrap? (No — it configures containerd on the NODE. ALL pods, forever.)
+10. What does pullPolicy: IfNotPresent do? (Use cached if available, pull if not. Safe default for air-gap.)
