@@ -333,6 +333,72 @@ helm upgrade vault ./charts/vault \
 
 ---
 
+## 3b. What Kapitan Actually Configures — And Why Not Just Helm or Kustomize
+
+### "Can't Helm do the same thing? Or Kustomize?"
+
+**Kapitan is NOT configuring K8s manifests.** It's a GENERAL-PURPOSE template compiler that sits ABOVE Helm, Terraform, and everything else. It generates the INPUTS that feed into those tools.
+
+**The tool hierarchy at VivSoft:**
+```
+Kapitan (generates scripts + Helm values + Crossplane YAML + pipeline config)
+    ↓ outputs
+Shell scripts that call:
+    ↓
+Zarf / UDS (bundles + deploys packages)
+    ↓ which contain
+Helm charts (template K8s manifests with the values Kapitan generated)
+    ↓ which render
+K8s manifests (Deployments, Services, etc.)
+    ↓ applied to
+Kubernetes cluster
+```
+
+**ONE Kapitan class (`bb-vault.yml`) generates:**
+1. A Helm values override for Vault's chart (what replicas, memory, storage to use)
+2. A shell script that calls `uds deploy` with the right bundle version
+3. A Crossplane claim YAML for Vault's RDS backend database
+4. Pipeline variables for the toggle-based GitLab CI
+
+**Helm alone can't do that** — Helm only templates K8s manifests. It can't generate shell scripts, Terraform variables, Crossplane claims, or pipeline config. Kapitan crosses tool boundaries.
+
+### "But Helm has values files per environment"
+
+Yes — `helm install -f values-dev.yaml` vs `helm install -f values-prod.yaml`. That works for K8s manifests. But at VivSoft, a deploy involves MORE than just Helm:
+
+| What needs per-environment config | Can Helm do it? | Can Kapitan do it? |
+|----------------------------------|----------------|-------------------|
+| K8s manifest values (replicas, image, memory) | YES | YES (generates the Helm values file) |
+| Shell script for air-gap deployment | NO | YES |
+| Crossplane claim YAML for RDS provisioning | NO (not a Helm resource) | YES |
+| Pipeline toggle variables for GitLab CI | NO | YES |
+| Terraform variable overrides | NO | YES |
+
+Kapitan manages variables ACROSS all these tools from one place. One class defines Vault settings that feed into Helm AND scripts AND Crossplane AND the pipeline. Helm can't do that.
+
+### "Can Kustomize propagate changes?"
+
+Yes — Kustomize CAN propagate base changes to overlays. The problem isn't propagation, it's how patches reference things. Kustomize patches use STRUCTURAL PATHS like `/spec/containers/0/resources`. Kapitan uses NAMED VARIABLES like `{{ vault_memory }}`.
+
+Structural paths break when the YAML structure changes (add a sidecar, index shifts, wrong container gets patched). Named variables don't care about structure — they fill in wherever the template references them.
+
+Plus, Kustomize only patches K8s manifests — same limitation as Helm. Can't generate scripts, Terraform vars, or Crossplane claims.
+
+### When to use each:
+
+| Tool | What it does | When to use it |
+|------|-------------|---------------|
+| **Helm** | Templates K8s manifests with values.yaml | Packaging and deploying ONE service. Standard K8s. |
+| **Kustomize** | Patches base K8s manifests per environment | 2-3 environments, simple overrides. Built into kubectl. |
+| **Kapitan** | Compiles ANY template (scripts, values, configs) with class inheritance | Many environments (8+), MULTIPLE tools (Helm + scripts + Terraform + Crossplane). |
+
+**At VivSoft:** Kapitan generates → Helm values + deploy scripts + Crossplane YAML. Helm templates → K8s manifests inside Zarf packages. Kustomize not used — Kapitan replaced it.
+
+### How to explain to Andy:
+"Helm templates K8s manifests — great for packaging services. But we needed to manage variables across more than just K8s: shell scripts for air-gap deployment, Crossplane claims for self-service, pipeline toggles for CI/CD. Kapitan sits above Helm — it generates the Helm values, the deploy scripts, and the Crossplane YAML from one set of shared variables. One class change propagates to every tool, every environment. Helm alone can't cross that tool boundary."
+
+---
+
 ## 4. What "Stacking Patches" Means (Why It's Bad)
 
 Imagine this Kustomize scenario:
