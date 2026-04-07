@@ -1142,6 +1142,183 @@ GitOps means **every environment change starts as a merge request**. There's a f
 ---
 
 
+## 12b. VivSoft JCRS-E — Unified Whiteboard Diagram
+
+> **This is what you study for the whiteboard.** One diagram showing the full system: air-gap packaging flow, infrastructure layers, cluster services, multi-repo architecture, pipeline, and self-service. Maps to the 16 questions in `vivsoft-platform.md`.
+
+```mermaid
+---
+config:
+  layout: elk
+  theme: dark
+---
+flowchart TD
+    subgraph GovCloud["AWS GovCloud (FedRAMP High · us-gov-west-1 · KMS encryption)"]
+        direction TB
+
+        subgraph AWS_Infra["Infrastructure (Terraform — kraken repo)"]
+            direction LR
+            VPC["VPC<br/>private subnets only"]:::infra
+            KMS["KMS<br/>encryption at rest"]:::infra
+            S3["S3<br/>Terraform state<br/>Zarf bundles<br/>pipeline artifacts"]:::infra
+            TGW["Transit Gateway<br/>connects to parent org"]:::infra
+        end
+
+        subgraph EKS_Cluster["EKS Cluster (private endpoint · STIG'd AMIs)"]
+            direction TB
+
+            subgraph Nodes["Worker Nodes (Packer + Ansible + OSCAP · 90% DISA STIG)"]
+                direction LR
+                Node1["RHEL 8/9 AMI<br/>IMDSv2 hop=1<br/>forces IRSA"]:::k8s
+                InClusterReg["In-Cluster Registry<br/>127.0.0.1:31999<br/>(Zarf pushes images here)"]:::k8s
+            end
+
+            subgraph Core_Bundle["Core Platform Bundle (deployed first)"]
+                Istio["Istio<br/>mTLS pod-to-pod<br/>ingress gateway<br/>Envoy sidecars"]:::core
+                Kyverno["Kyverno<br/>admission policies<br/>blocks non-Iron Bank images"]:::core
+                Neuvector["Neuvector<br/>runtime container security<br/>process + file monitoring"]:::core
+                ObsStack["Prometheus + Alloy + Loki<br/>metrics, collection, logs<br/>(zero internet dependency)"]:::core
+                CertMgr["cert-manager + Trust-Manager<br/>certificate lifecycle"]:::core
+                Crossplane["Crossplane<br/>self-service cloud resources<br/>XRDs → Vault policies, RDS"]:::core
+                Authservice["Authservice<br/>Envoy SSO proxy<br/>transparent to apps"]:::core
+            end
+
+            subgraph Enterprise_Bundle["Enterprise Services Bundle (deployed second — depends on Core)"]
+                Vault["Vault<br/>Raft HA · multi-tenant<br/>per-team policies via Crossplane<br/>TLS passthrough (own certs)"]:::enterprise
+                Keycloak["Keycloak<br/>OIDC · MFA · CAC auth<br/>RDS backend via Crossplane"]:::enterprise
+                ArgoCD_Ent["ArgoCD<br/>GitOps for mission apps"]:::enterprise
+                GitLabNexus["GitLab + Nexus<br/>DevOps lifecycle"]:::enterprise
+                Viz["Grafana · Kiali · Tempo<br/>dashboards · mesh viz · tracing"]:::enterprise
+            end
+
+            subgraph Mission_Apps["Mission Applications (Layer 5)"]
+                JAWS["JAWS"]:::app
+                CyberAlly["CyberAlly"]:::app
+                OpenCTI["OpenCTI"]:::app
+                AppNote["Deploy via ArgoCD<br/>get identity, secrets,<br/>observability, mesh<br/>automatically — no tickets"]:::app
+            end
+        end
+    end
+
+    subgraph AirGap_Flow["Air-Gap Packaging Flow (build ↔ deploy decoupled)"]
+        direction TB
+
+        subgraph Connected_Side["Connected Side (has internet)"]
+            BuildRunner["GitLab CI Runner<br/>(internet-connected EC2)"]:::build
+            IronBank["Iron Bank<br/>(DoD hardened images)"]:::build
+            Trivy["Trivy Scan<br/>(CVE check before bundle)"]:::build
+            ZarfCreate["Zarf Package Create<br/>(images + Helm charts<br/>→ .tar.zst archive)"]:::build
+        end
+
+        subgraph Transfer["Transfer Layer"]
+            S3_Bridge["S3 Bucket<br/>(artifact bridge)<br/>connected pushes ↑<br/>air-gap pulls ↓ via VPC endpoint"]:::transfer
+        end
+
+        subgraph Deploy_Side["Air-Gap Side (no internet)"]
+            UDS["UDS Deploy<br/>(dependency order:<br/>core first, then enterprise)"]:::build
+            FluxCD["FluxCD<br/>(in-cluster reconciliation<br/>watches HelmRelease CRDs<br/>reverts drift automatically)"]:::build
+        end
+    end
+
+    subgraph Config_Management["Configuration Management (Kapitan — jcrs-cac repo)"]
+        direction LR
+        Classes["Classes (shared defaults)<br/>bb-vault.yml · bb-keycloak.yml<br/>bb-monitoring.yml · 20+ files"]:::config
+        Targets["Targets (5 lines each)<br/>dev · staging-left · staging-right<br/>production · siprnet-staging<br/>siprnet-prod · ephemerals"]:::config
+        Compile["kapitan compile<br/>→ output per environment:<br/>deploy scripts + Helm values<br/>+ Crossplane claims"]:::config
+    end
+
+    subgraph Pipeline["CI/CD Pipeline (release-automation repo · 7 stages)"]
+        direction LR
+        PREP["1. PREP<br/>compile Kapitan"]:::pipeline
+        INFRA["2. INFRA<br/>Terraform"]:::pipeline
+        CLUSTER["3. CLUSTER<br/>EKS + AMIs"]:::pipeline
+        ZARFINIT["4. ZARF INIT<br/>in-cluster registry"]:::pipeline
+        CORE_STAGE["5. CORE<br/>core bundle"]:::pipeline
+        ENT_STAGE["6. ENTERPRISE<br/>enterprise bundle"]:::pipeline
+        DESTROY["7. DESTROY<br/>(TTL expiry)"]:::pipeline
+        TOGGLES["Toggle-based:<br/>skip unchanged stages<br/>saves 45 min"]:::pipeline
+        VERIFY["Verification jobs<br/>run after EVERY stage<br/>catches drift"]:::pipeline
+    end
+
+    subgraph Multi_Repo["Multi-Repo Architecture (classification boundary separation)"]
+        direction LR
+        Repo_CAC["jcrs-cac<br/>Config-as-Code<br/>(Kapitan)<br/>heightened review<br/>for SIPRNET targets"]:::repo
+        Repo_Kraken["kraken<br/>Infrastructure-as-Code<br/>(Terraform)<br/>stays unclassified<br/>devs work freely"]:::repo
+        Repo_Lev["leviathan<br/>Zarf/UDS packages<br/>(build factory)"]:::repo
+        Repo_Rel["release-automation<br/>7-stage pipeline<br/>(orchestration)"]:::repo
+    end
+
+    %% Air-gap packaging flow
+    BuildRunner -- "pulls from" --> IronBank
+    BuildRunner -- "scans" --> Trivy
+    Trivy -- "clean images" --> ZarfCreate
+    ZarfCreate -- "uploads bundles" --> S3_Bridge
+    S3_Bridge -- "VPC endpoint pull<br/>(private, no internet)" --> UDS
+    UDS -- "pushes images to" --> InClusterReg
+    UDS -- "deploys charts" --> Core_Bundle
+    UDS -- "deploys charts" --> Enterprise_Bundle
+    FluxCD -- "continuously reconciles<br/>HelmReleases" --> Core_Bundle
+    FluxCD -- "continuously reconciles" --> Enterprise_Bundle
+
+    %% Kapitan flow
+    Classes -- "inherited by" --> Targets
+    Targets -- "compiled by" --> Compile
+    Compile -- "generates scripts<br/>for pipeline" --> Pipeline
+
+    %% Pipeline flow
+    PREP --> INFRA --> CLUSTER --> ZARFINIT --> CORE_STAGE --> ENT_STAGE
+    CORE_STAGE -- "deploys" --> Core_Bundle
+    ENT_STAGE -- "deploys" --> Enterprise_Bundle
+
+    %% Crossplane self-service
+    Crossplane -- "provisions Vault policies<br/>via HTTP API" --> Vault
+    Crossplane -- "provisions RDS<br/>for Keycloak" --> Keycloak
+
+    %% Multi-repo feeds
+    Repo_CAC -- "config" --> Compile
+    Repo_Kraken -- "infra" --> INFRA
+    Repo_Lev -- "bundles" --> S3_Bridge
+    Repo_Rel -- "pipeline def" --> Pipeline
+
+    %% Mission app self-service
+    ArgoCD_Ent -- "syncs apps<br/>from team Git repos" --> Mission_Apps
+
+    %% Node image pulls
+    Node1 -- "pulls from<br/>in-cluster registry" --> InClusterReg
+
+    classDef infra fill:#553c9a,color:#fff,stroke:#333,stroke-width:2px
+    classDef k8s fill:#2b6cb0,color:#fff,stroke:#333,stroke-width:2px
+    classDef core fill:#2f855a,color:#fff,stroke:#333,stroke-width:2px
+    classDef enterprise fill:#c53030,color:#fff,stroke:#333,stroke-width:2px
+    classDef app fill:#975a16,color:#fff,stroke:#333,stroke-width:2px
+    classDef build fill:#cce5ff,stroke:#004085,stroke-width:2px
+    classDef transfer fill:#fff3cd,stroke:#856404,stroke-width:2px
+    classDef config fill:#d4edda,stroke:#155724,stroke-width:2px
+    classDef pipeline fill:#e2e3e5,stroke:#383d41,stroke-width:2px
+    classDef repo fill:#fce4ec,stroke:#c62828,stroke-width:2px
+```
+
+### What This Unified Diagram Shows
+
+**Compared to the 13 separate diagrams in this file, this single diagram shows:**
+- The FULL air-gap packaging flow: Iron Bank → Trivy → Zarf → S3 → VPC endpoint → UDS → in-cluster registry
+- How Kapitan feeds the pipeline: classes + targets → compile → scripts that the 7-stage pipeline runs
+- How the 4 repos connect: jcrs-cac → config, kraken → infra, leviathan → bundles, release-automation → pipeline
+- The two bundles and their dependency: core deploys FIRST (Istio, Kyverno, monitoring), enterprise deploys SECOND (Vault, Keycloak, ArgoCD)
+- FluxCD continuously reconciling inside the cluster (drift detection)
+- Crossplane self-service: provisions Vault policies AND Keycloak's RDS
+- Mission apps getting everything automatically via ArgoCD
+- Color-coded by layer: purple=infra, blue=k8s, green=core, red=enterprise, gold=apps
+
+### How to Use This Diagram
+
+1. **Study it** — render in mermaid.live, trace every arrow, understand every relationship
+2. **Draw from the 16 questions** — the questions guide what to draw, this diagram is the ANSWER KEY
+3. **After drawing from memory** — open this diagram and compare. What did you miss?
+4. **For the whiteboard** — you won't draw ALL of this. Draw the sections Andy asks about. The 16 questions method tells you which sections to draw based on what he's asking.
+
+---
+
 ## 13. Quick Reference
 
 
