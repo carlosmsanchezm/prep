@@ -513,6 +513,7 @@ flowchart TD
         S3["S3 Buckets<br/>- terraform-state<br/>- pipeline-artifacts"]:::aws
         SecretsManager["Secrets Manager<br/>DB passwords, API keys"]:::aws
         IAM["IAM<br/>OIDC Provider<br/>IRSA roles per pod"]:::aws
+        Route53["Route53<br/>Private Hosted Zone:<br/>nightwatch.internal<br/>(kubeflow, grafana, argocd<br/>→ NLB IP)"]:::aws
     end
 
     subgraph BirdDog["Bird-Dog Network (Controlled Egress — Simulated Air-Gap)"]
@@ -554,12 +555,13 @@ flowchart TD
                 end
 
                 subgraph Infra_Services["Infrastructure Services (I deployed via ArgoCD)"]
-                    Istio["Istio<br/>service mesh + ingress gateway"]:::k8s
+                    Istio["Istio<br/>service mesh + ingress gateway<br/>mTLS pod-to-pod (istiod CA)"]:::k8s
                     ArgoCD_Pod["ArgoCD<br/>polls argoflow repo every 3min<br/>syncs manifests → kubectl apply"]:::gitops
                     Autoscaler["Cluster Autoscaler<br/>watches pending pods<br/>scales ASGs via IRSA"]:::k8s
                     ExtSecrets["External Secrets<br/>syncs AWS Secrets Manager<br/>→ K8s Secrets via IRSA"]:::k8s
-                    Keycloak["Keycloak<br/>SSO identity provider"]:::k8s
+                    Keycloak["Keycloak<br/>SSO identity provider<br/>OIDC / JWT"]:::k8s
                     Monitoring["Prometheus + Grafana + Loki<br/>metrics, dashboards, logs"]:::k8s
+                    CertMgr["cert-manager + step-ca<br/>internal PKI (air-gap CA)<br/>auto-issues + rotates TLS certs<br/>for Istio Gateway + Keycloak"]:::k8s
                 end
 
                 subgraph App_Workloads["Application Workloads (deployed by ArgoCD, run on Workers)"]
@@ -577,8 +579,9 @@ flowchart TD
 
     %% USER ACCESS PATH (Bird-Dog controlled)
     User["Data Scientist /<br/>Engineer"]:::user -- "1. RDP" --> Workspaces
-    Workspaces -- "2. browser via TGW" --> NLB
-    NLB -- "3. TCP forward" --> Istio
+    Workspaces -- "2. DNS: kubeflow.nightwatch.internal<br/>→ Route53 resolves → NLB IP" --> Route53
+    Workspaces -- "3. browser via TGW" --> NLB
+    NLB -- "4. TCP passthrough" --> Istio
 
     %% GITOPS FLOW
     DevOps["DevSecOps Engineer"]:::user -- "git push manifests" --> GitRepo["argoflow<br/>Git Repository<br/>(K8s manifests = source of truth)"]:::gitops
@@ -602,6 +605,10 @@ flowchart TD
     CPU1 -- "pull images<br/>(registries.yaml<br/>→ ECR via allowlist)" --> ECR
     GPU1 -- "pull images<br/>(registries.yaml → ECR)" --> ECR
 
+    %% TLS CERTIFICATES
+    CertMgr -- "issues TLS certs to" --> Istio
+    CertMgr -- "issues TLS certs to" --> Keycloak
+
     %% STORAGE
     Keycloak -- "DB" --> RDS
     ArgoCD_Pod -- "DB" --> RDS
@@ -610,7 +617,7 @@ flowchart TD
     App_Workloads -- "mount shared storage" --> EFS
 
     %% IaC + CONFIG MANAGEMENT
-    Terraform["Terraform<br/>(provisions all AWS:<br/>VPC, ASGs, RDS, EFS, ECR,<br/>IAM, TGW attachment, NFW rules)"]:::iac -- "provisions" --> AWS_Services
+    Terraform["Terraform<br/>(provisions all AWS:<br/>VPC, ASGs, RDS, EFS, ECR,<br/>IAM, TGW attachment, NFW rules,<br/>Route53 private zone)"]:::iac -- "provisions" --> AWS_Services
     Terraform -- "provisions" --> Nightwatch_VPC
     Terraform -- "provisions" --> BirdDog
 
@@ -642,9 +649,11 @@ flowchart TD
 **The story it tells:**
 1. **The entire environment sits inside Bird-Dog** — spoke VPCs connected via Transit Gateway, all egress through Network Firewall. Deny-by-default. Only ECR, S3, STS allowlisted. No open internet.
 2. **Users access via Workspaces** — RDP into AWS Workspaces in the Directory spoke, then browser through TGW to the NLB in the Nightwatch spoke. NLB is NOT internet-facing.
-3. **Terraform provisions ALL AWS infrastructure** — VPC, ASGs, RDS, EFS, ECR, IAM, AND the Bird-Dog network (TGW attachment, NFW rules)
+3. **Terraform provisions ALL AWS infrastructure** — VPC, ASGs, RDS, EFS, ECR, IAM, Route53 private zone, AND the Bird-Dog network (TGW attachment, NFW rules)
 4. **Ansible bootstraps the RKE2 nodes** — binary, config, registries.yaml, firewall, service. Servers serial (etcd ordering), workers parallel.
 5. **ArgoCD deploys everything IN the cluster** — polls the argoflow Git repo every 3 minutes, detects changes, runs kubectl apply to sync desired state. Deploys both infra services AND app workloads. Ansible doesn't touch applications.
+6. **cert-manager + step-ca handle TLS** — step-ca is the internal CA (air-gap can't reach Let's Encrypt). cert-manager requests certs from step-ca, issues to Istio Gateway and Keycloak. Istio's mTLS between pods uses istiod's own CA — separate system, auto-rotated every 24 hours.
+7. **Two DNS systems** — Route53 private zone for external access (users on Workspaces resolve `kubeflow.nightwatch.internal` → NLB IP). CoreDNS inside the cluster for internal service discovery (pods resolve `keycloak.auth.svc.cluster.local` → ClusterIP). Terraform provisions Route53, CoreDNS comes with RKE2 automatically.
 6. **IRSA gives pods AWS access** — Autoscaler assumes IAM role to scale ASGs, External Secrets assumes role to read Secrets Manager. Pod-level least-privilege.
 7. **registries.yaml redirects image pulls to ECR** — containerd on every node pulls from ECR via the Bird-Dog allowlist. Never hits public internet.
 8. **Application workloads run ON the worker nodes** — Kubeflow pods scheduled onto CPU/GPU workers by K8s scheduler. Deployed by ArgoCD from Git, not by Ansible.
