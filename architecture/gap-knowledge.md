@@ -619,24 +619,36 @@ jcrs-cac repo (lives on UNCLASSIFIED side):
 └── targets/siprnet-prod.yml               # compile for SIPRNET
 ```
 
-**The compile step runs on the UNCLASSIFIED side.** It generates outputs for ALL environments, including SIPRNET. But the SIPRNET target's values are NOT classified — they're just configuration: "use this registry, this account ID, this domain." These values describe WHERE to deploy, not classified content.
+**The jcrs-cac repo is NOT classified.** It stays on the unclassified side. It compiles on the unclassified side. It contains configuration VALUES — registry endpoints, replica counts, domain names — not classified data.
 
-The COMPILED output for SIPRNET gets Zarf-bundled and transferred via CDS. The Kapitan repo itself stays unclassified.
+**But it has heightened change management for SIPRNET targets.** When someone changes a SIPRNET target file or a shared class that SIPRNET inherits from, the MR goes through additional security review. Changes to dev or staging targets? Normal review, no heightened process.
 
-**What about truly classified values?**
-Anything classified — like SIPRNET-specific secrets, hostnames that can't exist on the unclassified side — gets injected at DEPLOY TIME from Vault on the SIPRNET side. Never stored in the Kapitan repo.
+**This is the velocity win over TAURUS:**
 
 ```
-Unclassified Kapitan repo → compile → SIPRNET output (non-classified config values)
-                                            ↓
-                                      bundle with Zarf
-                                            ↓
-                                      transfer via CDS
-                                            ↓
-                              SIPRNET deploy + Vault injects classified secrets
+TAURUS (one repo for everything):
+  Security team can't scope review
+  → ANY change to ANY file MIGHT affect SIPRNET
+  → EVERY change gets heightened review
+  → Developer wants to update a Terraform subnet = heightened review
+  → SLOW
+
+Split repos:
+  kraken (infrastructure):
+    → ZERO SIPRNET touchpoints
+    → Normal review for everything
+    → Developers work freely
+
+  jcrs-cac (config):
+    → Has SIPRNET targets + shared classes
+    → Heightened review ONLY for MRs touching SIPRNET targets or shared classes
+    → Dev/staging changes flow normally
+    → SCOPED review, not blanket review
 ```
 
-**How to explain:** "The Kapitan repo stays unclassified — it contains configuration values, not classified data. We compile all targets on the unclassified side. SIPRNET values like registry endpoints are just configuration — not classified. Anything truly classified gets injected at deploy time from Vault on the classified side, never stored in the config repo."
+**The COMPILED output for SIPRNET** gets Zarf-bundled and transferred via CDS. Anything truly classified — secrets, operational data — gets injected by Vault at DEPLOY TIME on the classified side. Never stored in the config repo.
+
+**How to explain:** "The jcrs-cac repo is not classified — it stays unclassified, compiles unclassified. But since it generates output that deploys to SIPRNET, SIPRNET-related changes go through heightened security review. The split was about scoping that review: with TAURUS, every change triggered heightened review because the repo had SIPRNET touchpoints mixed with everything else. With two repos, infrastructure changes in kraken are completely out of scope — only config changes targeting SIPRNET need the heightened review. That's the velocity win."
 
 ---
 
