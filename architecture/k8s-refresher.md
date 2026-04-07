@@ -220,6 +220,201 @@ A K8s controller (runs as pods in the cluster) that continuously syncs the clust
 **How to explain GitOps to Andy:**
 "Git is the source of truth. I push manifests to the argoflow repo. ArgoCD polls it every three minutes, detects changes, and syncs the cluster — runs kubectl apply under the hood. If the cluster drifts from Git — someone manually edits something — ArgoCD detects it and reverts. Nobody can make permanent changes without going through Git. Full audit trail, every change is a commit."
 
+### 5b. Inside the ArgoFlow Repo — What It Looks Like and How It Works
+
+> This is the missing piece: you know ArgoCD syncs from a Git repo, but what does that repo ACTUALLY contain?
+
+**The argoflow repo structure:**
+
+```
+argoflow/
+├── apps/                              # ArgoCD Application definitions
+│   ├── istio.yaml                     #   "deploy Istio from charts/istio to istio-system namespace"
+│   ├── keycloak.yaml                  #   "deploy Keycloak from charts/keycloak to keycloak namespace"
+│   ├── monitoring.yaml                #   "deploy Prometheus stack to monitoring namespace"
+│   ├── external-secrets.yaml          #   "deploy ESO to kube-system namespace"
+│   ├── cluster-autoscaler.yaml        #   "deploy autoscaler to kube-system namespace"
+│   └── kubeflow.yaml                  #   "deploy Kubeflow to kubeflow namespace"
+│
+├── charts/                            # Helm charts (or plain manifests) for each service
+│   ├── istio/
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml
+│   │   └── templates/
+│   ├── keycloak/
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml
+│   │   └── templates/
+│   ├── monitoring/
+│   │   └── ...
+│   └── kubeflow/
+│       └── ...
+│
+├── base/                              # Shared manifests (namespaces, RBAC, network policies)
+│   ├── namespaces.yaml                #   creates: istio-system, keycloak, monitoring, kubeflow
+│   ├── rbac.yaml                      #   cluster-wide RBAC rules
+│   └── network-policies.yaml          #   default deny + allowed paths
+│
+└── README.md
+```
+
+**What's an ArgoCD Application definition?**
+
+This is the KEY file — it tells ArgoCD: "watch THIS path in THIS repo, deploy it to THIS namespace on THIS cluster."
+
+```yaml
+# apps/keycloak.yaml — this is an ArgoCD Application
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keycloak                         # name shown in ArgoCD UI
+  namespace: argocd                      # ArgoCD's own namespace
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"    # deploy AFTER wave 0 and 1
+spec:
+  project: default                       # ArgoCD project (RBAC boundary)
+
+  # SOURCE: where to read manifests FROM
+  source:
+    repoURL: https://gitea.local/argoflow.git   # LOCAL Git — not github.com
+    targetRevision: main                          # branch to watch
+    path: charts/keycloak                         # directory in the repo
+    helm:                                         # it's a Helm chart
+      valueFiles:
+        - values.yaml                             # default values
+      # Can override values inline too:
+      parameters:
+        - name: replicas
+          value: "2"
+
+  # DESTINATION: where to deploy TO
+  destination:
+    server: https://kubernetes.default.svc   # this cluster (in-cluster)
+    namespace: keycloak                       # target namespace
+
+  # SYNC POLICY: how ArgoCD manages this application
+  syncPolicy:
+    automated:
+      prune: true          # delete resources removed from Git
+      selfHeal: true       # revert manual changes back to Git state
+    syncOptions:
+      - CreateNamespace=true   # create namespace if it doesn't exist
+```
+
+**What each field means:**
+
+| Field | What it does | Why it matters |
+|-------|-------------|----------------|
+| `source.repoURL` | Git repo ArgoCD watches | LOCAL repo — not github.com. Air-gap safe. |
+| `source.path` | Directory in the repo containing manifests or Helm chart | Each service has its own directory. ArgoCD only watches THIS path. |
+| `source.targetRevision` | Branch or tag to sync from | `main` = always latest. Could be `v1.2.0` for pinned versions. |
+| `source.helm.valueFiles` | Helm values file to use | Environment-specific config lives here. |
+| `destination.server` | Which K8s cluster to deploy to | `https://kubernetes.default.svc` = the cluster ArgoCD is running on. |
+| `destination.namespace` | Target namespace | Each service gets its own namespace — isolation. |
+| `syncPolicy.automated.prune` | Delete resources removed from Git | If you remove a ConfigMap from Git, ArgoCD deletes it from the cluster. Keeps things clean. |
+| `syncPolicy.automated.selfHeal` | Revert manual cluster changes | Someone runs `kubectl edit` to change replicas? ArgoCD reverts it. Git is truth. |
+| `sync-wave` annotation | Ordering — which apps deploy first | Wave 0 = CRDs and namespaces. Wave 1 = Istio (mesh must exist before services register). Wave 2 = everything else. |
+
+**How ArgoCD processes this:**
+
+```
+1. ArgoCD starts up, reads all Application YAMLs in the apps/ directory
+2. For each Application, ArgoCD:
+   a. Clones the repo (or pulls latest if already cloned)
+   b. Reads the manifests at the specified path
+   c. If it's Helm: runs helm template with the values file → produces K8s YAML
+   d. Compares the rendered YAML to what's actually in the cluster
+   e. If they match: status = "Synced"
+   f. If they differ: status = "OutOfSync" → auto-sync runs kubectl apply
+3. Every 3 minutes, repeats step 2 (polling)
+4. If someone manually changes something in the cluster:
+   → Next poll detects drift
+   → selfHeal reverts it back to Git state
+```
+
+**Sync Waves — controlling deployment order:**
+
+Some services MUST deploy before others. CRDs must exist before resources that use them. Istio's mesh must be running before services register with it.
+
+```
+Wave 0: Namespaces + CRDs (must exist first)
+  └── base/namespaces.yaml creates: istio-system, keycloak, monitoring, kubeflow
+  └── CRD definitions for any custom resources
+
+Wave 1: Core infrastructure (mesh, policies)
+  └── apps/istio.yaml (sync-wave: "1")
+  └── apps/external-secrets.yaml (sync-wave: "1")
+
+Wave 2: Services that depend on core
+  └── apps/keycloak.yaml (sync-wave: "2")
+  └── apps/monitoring.yaml (sync-wave: "2")
+  └── apps/cluster-autoscaler.yaml (sync-wave: "2")
+
+Wave 3: Application workloads
+  └── apps/kubeflow.yaml (sync-wave: "3")
+```
+
+ArgoCD deploys ALL wave 0 apps first, waits for them to be healthy, then wave 1, then wave 2, then wave 3. If wave 1 fails (Istio won't start), wave 2 never deploys — prevents cascading failures.
+
+**App of Apps pattern — how ArgoCD discovers Application definitions:**
+
+Instead of manually creating each Application in ArgoCD, you create ONE "parent" Application that points to the `apps/` directory:
+
+```yaml
+# The ONE Application you create manually (or via Helm during cluster bootstrap):
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://gitea.local/argoflow.git
+    path: apps                            # directory containing ALL Application YAMLs
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+ArgoCD reads this, finds all the YAML files in `apps/`, creates Application resources for each one. Those Applications then each sync their own service. ONE manual step → everything else is automated.
+
+**How to add a NEW service:**
+
+1. Create the Helm chart or manifests in `charts/my-new-service/`
+2. Create an Application YAML in `apps/my-new-service.yaml` pointing to that path
+3. Git commit and push
+4. ArgoCD detects the new Application definition (via app-of-apps)
+5. ArgoCD creates the Application, syncs the chart, deploys the service
+6. Done — no kubectl, no manual apply
+
+**How to UPDATE a service:**
+
+1. Change `values.yaml` in `charts/keycloak/` (e.g., bump image tag)
+2. Git commit and push
+3. ArgoCD polls, detects: "keycloak chart changed"
+4. ArgoCD re-renders the Helm template with new values
+5. ArgoCD compares rendered output to cluster state → "OutOfSync"
+6. ArgoCD runs kubectl apply → K8s does rolling update
+7. ArgoCD watches rollout → "Synced" and "Healthy"
+
+**How to DELETE a service:**
+
+1. Delete `apps/my-service.yaml` from Git
+2. Git commit and push
+3. ArgoCD detects: "Application definition gone"
+4. With prune=true: ArgoCD deletes all resources it created for that service
+5. Service is gone — clean, no orphans
+
+**How to explain to Andy:**
+"The argoflow repo has two directories: apps/ and charts/. Charts/ has the Helm chart for each service — Istio, Keycloak, monitoring, Kubeflow. Apps/ has one ArgoCD Application YAML per service — each one says 'watch this chart, deploy to this namespace, auto-sync, self-heal.' An app-of-apps parent Application points to the apps/ directory, so ArgoCD discovers all services automatically. Adding a new service is: write the chart, write the Application YAML, push to Git. ArgoCD handles the rest. Sync waves control ordering — CRDs first, mesh second, services third, apps last."
+
 ---
 
 ## 6. Istio Service Mesh — What It Does and How
