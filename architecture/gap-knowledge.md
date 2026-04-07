@@ -198,6 +198,136 @@ inventory/
 
 **The killer difference:** With Kustomize, if you change the base Deployment structure (say, add a new container), every overlay's patches that touch the Deployment might break. With Kapitan, you change the template once and every target that compiles against it gets the change — no patch conflicts.
 
+### Concrete Example: How ONE Template Becomes 8 Outputs
+
+**The template (ONE file — used by all environments):**
+```
+# templates/deploy-vault.sh.j2
+#!/bin/bash
+echo "Deploying Vault to {{ env_name }}"
+helm upgrade vault ./charts/vault \
+  --set server.ha.replicas={{ vault_replicas }} \
+  --set server.resources.limits.memory={{ vault_memory }} \
+  --set server.dataStorage.size={{ vault_storage }} \
+  --set global.tlsDisable={{ tls_disable }} \
+  --set server.image.repository={{ vault_image }} \
+  --namespace vault
+```
+
+The `{{ }}` parts are VARIABLES — no values yet. Kapitan fills them in.
+
+**The class (shared defaults — inherited by everyone):**
+```yaml
+# classes/defaults/bb-vault.yml
+parameters:
+  vault_replicas: 1
+  vault_memory: "2Gi"
+  vault_storage: "10Gi"
+  tls_disable: false
+  vault_image: "registry.local/vault:1.15"
+```
+
+**Environment classes (override specific values):**
+```yaml
+# classes/environments/dev.yml
+parameters:
+  env_name: "dev"
+  vault_replicas: 1
+  vault_memory: "1Gi"       # smaller for dev
+  tls_disable: true          # skip TLS in dev for speed
+```
+
+```yaml
+# classes/environments/prod.yml
+parameters:
+  env_name: "production"
+  vault_replicas: 3          # HA for production
+  vault_memory: "8Gi"        # more memory
+  vault_storage: "50Gi"      # more data
+```
+
+```yaml
+# classes/environments/siprnet-prod.yml
+parameters:
+  env_name: "siprnet-production"
+  vault_replicas: 3
+  vault_memory: "8Gi"
+  vault_storage: "50Gi"
+  vault_image: "ironbank-mirror.siprnet/vault:1.15"  # DIFFERENT registry on classified
+```
+
+**Target files (5 lines each — "I am THIS environment"):**
+```yaml
+# targets/dev-cluster.yml
+classes:
+  - defaults.bb-vault          # inherit Vault defaults
+  - environments.dev            # override with dev values
+```
+
+```yaml
+# targets/prod-cluster.yml
+classes:
+  - defaults.bb-vault
+  - environments.prod
+```
+
+```yaml
+# targets/siprnet-prod.yml
+classes:
+  - defaults.bb-vault
+  - environments.siprnet-prod
+```
+
+**Run `kapitan compile` — what comes out:**
+
+For dev-cluster:
+```bash
+#!/bin/bash
+echo "Deploying Vault to dev"
+helm upgrade vault ./charts/vault \
+  --set server.ha.replicas=1 \
+  --set server.resources.limits.memory=1Gi \
+  --set server.dataStorage.size=10Gi \
+  --set global.tlsDisable=true \
+  --set server.image.repository=registry.local/vault:1.15 \
+  --namespace vault
+```
+
+For prod-cluster:
+```bash
+#!/bin/bash
+echo "Deploying Vault to production"
+helm upgrade vault ./charts/vault \
+  --set server.ha.replicas=3 \
+  --set server.resources.limits.memory=8Gi \
+  --set server.dataStorage.size=50Gi \
+  --set global.tlsDisable=false \
+  --set server.image.repository=registry.local/vault:1.15 \
+  --namespace vault
+```
+
+For siprnet-prod:
+```bash
+#!/bin/bash
+echo "Deploying Vault to siprnet-production"
+helm upgrade vault ./charts/vault \
+  --set server.ha.replicas=3 \
+  --set server.resources.limits.memory=8Gi \
+  --set server.dataStorage.size=50Gi \
+  --set global.tlsDisable=false \
+  --set server.image.repository=ironbank-mirror.siprnet/vault:1.15 \
+  --namespace vault
+```
+
+**ONE template → THREE different outputs.** Same structure, different values. Now multiply by 8 environments × 20+ services = 160+ compiled scripts from ONE set of templates.
+
+**The power:** Need to change Vault's default storage across ALL environments?
+1. Edit `classes/defaults/bb-vault.yml` — change `vault_storage: "20Gi"`
+2. Run `kapitan compile` — all 8 targets recompile with the new value
+3. Done. ONE file change, ALL environments updated.
+
+**With Kustomize:** Change the base, then check each of the 8 overlay directories for patch conflicts, fix broken patches, apply per environment. At 8 environments, that's painful. At 20 services × 8 environments, it's unmanageable.
+
 ### How to explain to Andy:
 "Kustomize patches a base: 'take this YAML, change these fields per environment.' Works fine for 2-3 environments. At 8+ environments across classification levels, you end up with dozens of patch files that can conflict when the base changes. Kapitan uses inheritance: shared defaults in classes, 5-line target files per environment. Change a default once, every target picks it up. No patch conflicts, no file explosion. For JCRS-E with 8 environments across 2 classification levels, inheritance was the only sane approach."
 
