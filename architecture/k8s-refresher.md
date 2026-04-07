@@ -452,6 +452,145 @@ WITH Istio:
 **Why Istio for Nightwatch:**
 "Zero-trust networking. Every pod-to-pod call is mTLS encrypted without changing application code. Plus observability — I can see which service called which, latency, error rates, all in Grafana. And the ingress gateway handles external traffic routing so I don't need separate nginx or HAProxy."
 
+### 6b. TLS/SSL and Certificate Management in the RKE2 Cluster
+
+**Three layers of TLS happening simultaneously:**
+
+```
+LAYER 1: External traffic (user → NLB → Istio Ingress Gateway)
+  User's browser ──HTTPS──→ NLB ──TCP passthrough──→ Istio Ingress Gateway
+  TLS terminates AT the Ingress Gateway (Gateway has the cert)
+
+LAYER 2: Internal pod-to-pod (Istio mTLS — automatic)
+  Pod A (Envoy sidecar) ──mTLS──→ Pod B (Envoy sidecar)
+  istiod issues certs to every sidecar automatically
+  App code sees plain HTTP — sidecars handle encryption transparently
+
+LAYER 3: Cluster infrastructure (K8s API server, etcd, kubelet)
+  RKE2 auto-generates certs for: API server, etcd peers, kubelet
+  Stored at /var/lib/rancher/rke2/server/tls/
+  Rotate automatically — RKE2 manages lifecycle
+```
+
+**How each layer works:**
+
+**Layer 1 — External TLS (NLB → Istio):**
+- NLB does TCP passthrough on port 443 — it does NOT terminate TLS, just forwards the encrypted bytes
+- Istio Ingress Gateway terminates TLS — it has the certificate for your domain (e.g., `kubeflow.nightwatch.internal`)
+- The cert comes from cert-manager (or step-ca for internal PKI in air-gap)
+- VirtualService CRD routes the decrypted traffic to the right backend service
+
+```yaml
+# Gateway CRD — tells Istio "listen on 443, use this cert"
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway     # which Envoy pod handles this
+  servers:
+    - port:
+        number: 443
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE                    # terminate TLS here
+        credentialName: main-tls-cert   # K8s Secret with cert + key
+      hosts:
+        - "*.nightwatch.internal"
+
+# VirtualService — routes traffic AFTER TLS termination
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: kubeflow-route
+spec:
+  hosts:
+    - "kubeflow.nightwatch.internal"
+  gateways:
+    - main-gateway
+  http:
+    - route:
+        - destination:
+            host: kubeflow-dashboard     # K8s Service name
+            port:
+              number: 8080
+```
+
+**Layer 2 — Internal mTLS (pod-to-pod via Istio):**
+- istiod (Istio's control plane) runs its own CA (Certificate Authority)
+- When a pod starts, istiod issues a short-lived certificate to its Envoy sidecar
+- Certs auto-rotate every 24 hours — no manual renewal
+- When Pod A calls Pod B: sidecars exchange certs, verify each other's identity, encrypt the traffic
+- Application code makes a plain `http://keycloak:8080` call — Envoy intercepts it, upgrades to mTLS transparently
+- This is "zero-trust" — even pods in the same namespace verify each other
+
+```
+PeerAuthentication CRD — enforces mTLS mode:
+
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system     # applies cluster-wide
+spec:
+  mtls:
+    mode: STRICT              # ALL traffic must be mTLS — no plain text allowed
+```
+
+STRICT = reject any non-mTLS connection. PERMISSIVE = accept both (use during migration when some pods don't have sidecars yet).
+
+**Layer 3 — RKE2 cluster infrastructure TLS:**
+- RKE2 auto-generates all internal certs at bootstrap:
+  - API server cert (what kubectl talks to on port 6443)
+  - etcd peer certs (server-to-server replication on 2380)
+  - etcd client certs (API server → etcd on 2379)
+  - kubelet certs (API server → kubelet on 10250)
+- Stored at `/var/lib/rancher/rke2/server/tls/`
+- RKE2 handles rotation automatically — no manual management
+- These are SEPARATE from Istio's certs — different CA, different purpose
+
+**Where cert-manager fits:**
+cert-manager is a K8s controller that automates TLS certificate creation and renewal for YOUR services (not K8s internals or Istio mTLS — those have their own CAs).
+
+Use cert-manager for:
+- Istio Ingress Gateway certs (the domain cert for external traffic)
+- Keycloak HTTPS cert
+- Any service that needs its own TLS endpoint
+
+```
+Certificate → cert-manager → CA (step-ca for air-gap, or self-signed) → K8s Secret → mounted by Ingress Gateway
+```
+
+In air-gap: you can't use Let's Encrypt (needs internet). You use step-ca — a self-hosted CA running inside the cluster. cert-manager requests certs from step-ca instead of Let's Encrypt. Same flow, local CA.
+
+**The full traffic flow for a user request:**
+
+```
+1. Data scientist types: https://kubeflow.nightwatch.internal
+2. DNS resolves to NLB IP (internal DNS via Route53 private hosted zone)
+3. Browser sends HTTPS request → NLB (TCP passthrough on 443)
+4. NLB forwards encrypted bytes → Istio Ingress Gateway pod
+5. Ingress Gateway terminates TLS using cert from cert-manager
+   (checks: is this cert valid? does the hostname match?)
+6. Gateway reads the VirtualService: "kubeflow.nightwatch.internal → kubeflow-dashboard:8080"
+7. Envoy in the Gateway pod opens mTLS connection to Kubeflow dashboard pod
+   (istiod-issued certs on both sides — mutual authentication)
+8. Kubeflow dashboard pod receives plain HTTP (its Envoy sidecar stripped the mTLS)
+9. App processes request, sends response back through the same chain
+```
+
+**Without Istio (just K8s Services):**
+- No mTLS between pods — traffic is plain HTTP inside the cluster
+- No automatic cert management for pod-to-pod
+- No traffic observability (who called who)
+- External traffic would need an Ingress Controller (nginx) instead of Istio Gateway
+- You'd manually configure TLS per service — more work, more drift
+
+**How to explain to Andy:**
+"Three layers of TLS. External: NLB passes traffic to Istio's ingress gateway, which terminates TLS using a cert from cert-manager backed by our internal CA — step-ca, since we can't reach Let's Encrypt in air-gap. Internal: Istio's istiod issues short-lived certs to every sidecar — auto-rotated every twenty-four hours. All pod-to-pod traffic is mTLS, enforced by a PeerAuthentication policy set to STRICT. Application code doesn't change — sidecars handle encryption transparently. Cluster infrastructure: RKE2 auto-generates API server, etcd, and kubelet certs at bootstrap, manages rotation itself. Three CAs, three purposes, all automated."
+
 ---
 
 ## 7. IRSA (IAM Roles for Service Accounts) — Explained Simply
