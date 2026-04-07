@@ -10,11 +10,71 @@
 
 ---
 
+## HOW TO DRAW — The 12 Questions Method
+
+> **Don't memorize the diagram. Walk through these 12 questions in order.** Each question forces you to draw one section. If you answer all 12, you'll have the complete architecture without memorizing a single box.
+
+**Say each question aloud as you draw. The question IS the narration.**
+
+| # | Question to ask yourself | What you draw | What you say |
+|---|-------------------------|--------------|-------------|
+| 1 | "What machines run the containers?" | Control Plane box (3x m5a.large, embedded etcd for HA quorum) + Worker Nodes box (CPU ASG: m5a.2xlarge, GPU ASG: g4dn.xlarge + NVIDIA Operator) | "Three control plane nodes with embedded etcd for HA — Raft quorum, lose one, two still agree. CPU workers for general loads, GPU workers with NVIDIA Operator for auto driver install." |
+| 2 | "Where do container images come from?" | ECR in AWS Services box. Arrow from workers → ECR labeled "registries.yaml" | "Images are pre-pushed to ECR on the connected side. registries.yaml on every node redirects containerd to pull from ECR — never hits internet." |
+| 3 | "How do containers get deployed?" | ArgoCD in infra services. Arrow from argoflow Git repo → ArgoCD → "kubectl apply, syncs manifests" | "Pure GitOps. I push manifests to the argoflow repo. ArgoCD polls every three minutes, detects changes, syncs to the cluster via kubectl apply. Drift detected and reverted." |
+| 4 | "How do services talk to each other?" | Istio in infra services. NLB box in VPC with arrow → Istio | "Istio service mesh — mTLS between pods, ingress gateway for external traffic. NLB is the only entry point, routes to Istio." |
+| 5 | "How do users authenticate?" | Keycloak in infra services | "Keycloak for SSO — OIDC. Users and service accounts authenticate through Keycloak. Data scientists get self-service access without managing credentials." |
+| 6 | "How do pods get AWS access?" | IAM with OIDC/IRSA in AWS Services. Arrow from Cluster Autoscaler → IAM | "IRSA — each pod gets its own IAM role via service account. Cluster Autoscaler assumes a role to scale ASGs. External Secrets assumes a role to read Secrets Manager. Pod-level least-privilege." |
+| 7 | "Where do secrets come from?" | Secrets Manager in AWS Services. External Secrets in infra services. Arrow: ExtSecrets → Secrets Manager | "AWS Secrets Manager holds DB passwords and API keys. External Secrets Operator syncs them into K8s Secrets via IRSA. No secrets in Git." |
+| 8 | "Where does data persist?" | RDS PostgreSQL + EFS in Managed Data Services box INSIDE the VPC | "RDS PostgreSQL backs three services: ArgoCD, Keycloak, Kubeflow databases. EFS provides shared NFS storage — notebooks mount it ReadWriteMany." |
+| 9 | "How do nodes scale?" | Cluster Autoscaler in infra services. Arrow: Autoscaler → IAM → ASGs | "Cluster Autoscaler watches for pending pods. No GPU node available? Autoscaler assumes IAM role, bumps ASG desired count. New node launches, NVIDIA Operator installs drivers, pod schedules." |
+| 10 | "How do I know what's happening?" | Prometheus + Grafana + Loki in infra services | "Prometheus scrapes metrics, Grafana for dashboards, Loki for log aggregation. Full observability running inside the cluster — zero internet dependency." |
+| 11 | "Where does Terraform state go?" | S3 in AWS Services | "S3 holds Terraform state and pipeline artifacts. Accessible from the cluster via VPC endpoint." |
+| 12 | "How is egress controlled?" | Bird-Dog box: TGW + Network Firewall. VPC attached as spoke. | "VPC is a spoke in our Bird-Dog network. All egress goes through Transit Gateway to Network Firewall — deny-by-default. Only ECR, S3, STS allowlisted." |
+
+**After drawing all 12:** Add Terraform box ("provisions all AWS infra") and Ansible box ("bootstraps RKE2 nodes — binary, config.yaml, registries.yaml, firewall, start service").
+
+**Then add application workloads INSIDE the cluster:** "Kubeflow ran on top — notebooks, pipelines, model serving. Twelve data scientists, tripled throughput. But that's the application layer — the infrastructure underneath is what I owned."
+
+---
+
 ## GAPS — Review Before Each Drawing Attempt
 
-> Add gaps here after each attempt. Read this FIRST before redrawing.
+> Attempt 1 gaps listed below. Read this FIRST before redrawing.
 
-*(empty — fill in after your first attempt)*
+### Attempt 1 — What I Missed:
+
+**AWS Services:**
+- Forgot Secrets Manager — because I skipped question 7 ("where do secrets come from?")
+- S3 was there but not sure if data belongs in AWS Services (YES: S3 holds terraform state + artifacts)
+
+**Infrastructure Services (missed several):**
+- ArgoCD was there but just a label — need to write: "polls argoflow repo every 3 min, syncs manifests via kubectl apply, detects drift"
+- Istio was there but missing: "service mesh + ingress gateway" labels
+- Prometheus/Grafana/Loki were there but missing: "metrics / dashboards / logs" — write the purpose, not just the name
+- FORGOT Keycloak — skipped question 5 (how do users authenticate?)
+- FORGOT External Secrets Operator — skipped question 7 (where do secrets come from?)
+- FORGOT Cluster Autoscaler — skipped question 9 (how do nodes scale?)
+- Put everything in one box — should separate or at least label each one's purpose
+
+**Control Plane:**
+- Drew "3 CPUs" but forgot "embedded etcd" — need to show WHY 3 nodes (HA, Raft quorum)
+
+**Worker Nodes:**
+- Forgot to show workers pull from ECR — skipped question 2 (where do images come from?)
+
+**Managed Data Services:**
+- FORGOT RDS PostgreSQL entirely — skipped question 8 (where does data persist?)
+- FORGOT EFS (NFS) — same question
+- These should be INSIDE the VPC, labeled "Managed Data Services"
+
+**Network:**
+- Forgot to put "private subnets" label under RKE2 cluster and managed data services
+
+### Before Next Attempt:
+1. Read the 12 questions above
+2. Walk through each one ALOUD before touching paper
+3. THEN draw — let the questions guide what goes on the whiteboard
+4. Speak while drawing — the narration helps you remember
 
 ---
 
