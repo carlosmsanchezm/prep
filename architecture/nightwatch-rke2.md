@@ -29,11 +29,17 @@
 | 9 | "How do nodes scale?" | Cluster Autoscaler in infra services. Arrow: Autoscaler → IAM → ASGs | "Cluster Autoscaler watches for pending pods. No GPU node available? Autoscaler assumes IAM role, bumps ASG desired count. New node launches, NVIDIA Operator installs drivers, pod schedules." |
 | 10 | "How do I know what's happening?" | Prometheus + Grafana + Loki in infra services | "Prometheus scrapes metrics, Grafana for dashboards, Loki for log aggregation. Full observability running inside the cluster — zero internet dependency." |
 | 11 | "Where does Terraform state go?" | S3 in AWS Services | "S3 holds Terraform state and pipeline artifacts. Accessible from the cluster via VPC endpoint." |
-| 12 | "How is egress controlled?" | Bird-Dog box: TGW + Network Firewall. VPC attached as spoke. | "VPC is a spoke in our Bird-Dog network. All egress goes through Transit Gateway to Network Firewall — deny-by-default. Only ECR, S3, STS allowlisted." |
+| 12 | "How are TLS certificates managed?" | cert-manager + step-ca in infra services | "cert-manager automates certificate creation and renewal. step-ca is our internal CA — runs as a pod inside the cluster. Can't use Let's Encrypt in air-gap, so step-ca signs all certs: Istio Gateway domain certs, Keycloak HTTPS certs. Auto-rotation, no manual renewal." |
+| 13 | "How do users resolve service names from outside the cluster?" | Route53 Private Hosted Zone in AWS Services | "Route53 private zone: nightwatch.internal. A records for kubeflow, grafana, argocd, keycloak — all point to the NLB IP. Private zone associated with both the Nightwatch VPC and the Directory/Workspaces VPC via TGW. Users on Workspaces resolve the names, hit the NLB, NLB routes to Istio." |
+| 14 | "How is egress controlled?" | Bird-Dog box: TGW + Network Firewall. VPC attached as spoke. | "VPC is a spoke in our Bird-Dog network. All egress goes through Transit Gateway to Network Firewall — deny-by-default. Only ECR, S3, STS allowlisted." |
 
-**After drawing all 12:** Add Terraform box ("provisions all AWS infra") and Ansible box ("bootstraps RKE2 nodes — binary, config.yaml, registries.yaml, firewall, start service").
+**After drawing all 14:** Add Terraform box ("provisions all AWS infra including Route53 zone") and Ansible box ("bootstraps RKE2 nodes — binary, config.yaml, registries.yaml, firewall, start service").
 
 **Then add application workloads INSIDE the cluster:** "Kubeflow ran on top — notebooks, pipelines, model serving. Twelve data scientists, tripled throughput. But that's the application layer — the infrastructure underneath is what I owned."
+
+**Note on CoreDNS:** CoreDNS runs inside the cluster automatically (kube-system namespace, installed by RKE2). You don't deploy it — it comes with the cluster. It handles INTERNAL DNS: `keycloak.auth.svc.cluster.local` → ClusterIP. Route53 handles EXTERNAL DNS: `kubeflow.nightwatch.internal` → NLB IP. Two DNS systems, two purposes:
+- **CoreDNS** = pod-to-pod inside cluster (automatic, you don't manage it)
+- **Route53** = user-to-service from outside cluster (Terraform provisions it)
 
 ---
 
