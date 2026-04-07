@@ -1,6 +1,47 @@
-## System Design Answer: Air-Gapped Dev Environment (First Day Scenario)
+# Architecture Practice: Air-Gapped Dev Environment (System Design Round)
 
-> **Prompt:** "Given a badge and laptop on your first day of work, design a foundational dev environment. Constraint: air-gapped, no internet for tools and services."
+## The Prompt
+"Given a badge and laptop on your first day of work, design a foundational dev environment. Constraint: air-gapped, no internet for tools and services."
+
+---
+
+## HOW TO DRAW — The Question Method (12 Questions)
+
+> Walk through these questions in order. Each one forces you to draw a section. The questions tell a STORY: you're a developer on day one, what do you need at each step?
+
+**"I just got hired. I have a badge and a laptop. How do I become productive in an air-gapped environment?"**
+
+| # | Question | What you draw | What you say |
+|---|----------|--------------|-------------|
+| 1 | "How do I physically get in and get on the network?" | Badge box (physical access), Laptop box (hardened RHEL, encrypted, pre-loaded tools), VPN/cert auth box (connects to isolated VLAN) | "Badge gets me in the building. Laptop is a hardened RHEL box — STIG'd, encrypted disk, pre-loaded with Git, Podman, Ansible, VS Code, SSH keys. I connect to the internal network via VPN with cert-based auth. No internet — isolated VLAN." |
+| 2 | "How does my laptop find services on this network?" | Internal DNS box (resolves gitlab.dev.internal, nexus.dev.internal, vault.dev.internal), NTP box (local time — can't reach pool.ntp.org), DHCP box | "Internal DNS — resolves all service hostnames locally. Internal NTP because air-gapped can't reach public time servers — clocks need to sync for TLS, logging, and Kerberos. DHCP or static IP assignment for the VLAN." |
+| 3 | "Where does the source code live?" | GitLab CE box: repos, MRs, issue tracking, built-in container registry | "Local GitLab CE — self-hosted, no github.com. Source code, merge request reviews, issue tracking. Built-in container registry so we don't need a separate one for images built by the pipeline. Everything stays internal." |
+| 4 | "How do I install packages and pull container images?" | Nexus box with 3 sub-sections: Docker registry (pre-mirrored images), Package repos (PyPI, RPM, npm, Go), Helm repo | "Can't pip install from PyPI or dnf install from the internet. Nexus Repository Manager mirrors everything — Python packages, RHEL RPMs, npm modules, Go module proxy, container images, Helm charts. All pre-transferred from the connected side. One tool handles ALL package types." |
+| 5 | "How do packages GET into this air-gapped network?" | Transfer flow: Connected side → Bundle station (pull + scan + checksum) → Approved media (diode/USB/CDS) → Receiving station → unpacks into Nexus | "On the connected side, a bundle station pulls packages and images, scans with Trivy, generates a manifest with checksums, packages into an archive. Transfer via diode or approved media — one-way, hardware-enforced. On the air-gapped side, a receiving station validates checksums, unpacks into Nexus repos. Automated, auditable, every transfer logged." |
+| 6 | "What happens when I push code?" | GitLab Runner box: Podman executor (rootless), pipeline stages: lint → build → scan → test → push artifact | "GitLab Runner with a Podman executor — rootless, pulls images from Nexus. Push triggers the pipeline: lint the code, build the container image, scan with SonarQube for vulnerabilities, test by running Ansible against a test VM, push passing artifacts to Nexus. All automated, no manual steps." |
+| 7 | "How does the pipeline test Ansible deployments?" | Test VM/container box: Ansible deploys playbooks here, validates configs before production | "Test targets — EC2 instances or local VMs inside the air-gapped network. The pipeline runs ansible-lint first, then actually deploys the playbook to the test target. If it fails, pipeline fails — blocked before production. Vault provides SSH certs so the runner can reach the test VMs securely." |
+| 8 | "How do I log in to everything?" | Keycloak box: OIDC/SSO for GitLab, Nexus, Grafana, Vault. Badge-linked identity. | "Keycloak for single sign-on. One login for everything — GitLab, Nexus, Grafana, Vault. Badge-linked identity if we're integrating with CAC or physical badge systems. No managing separate credentials per tool." |
+| 9 | "Where do secrets live?" | Vault box: secrets management, SSH cert signing, pipeline credentials, database passwords. Arrow: Vault → Runner (pipeline secrets), Vault → Test VMs (SSH certs) | "HashiCorp Vault. Secrets management — database passwords, API keys, pipeline credentials. SSH certificate signing — Ansible needs certs to reach test VMs, Vault issues short-lived certs per pipeline run. No hardcoded secrets anywhere — no .env files, no plain text in Git." |
+| 10 | "How do I know if something is broken?" | Prometheus + Grafana + Loki box. Arrows from all services → Prometheus. | "Prometheus scrapes metrics from every service — GitLab, runners, Nexus, test VMs. Grafana for dashboards: pipeline success rates, runner utilization, disk space. Loki for centralized log aggregation — if a build fails, I search Loki instead of SSH'ing to the runner. All internal, zero internet." |
+| 11 | "How do I build container images?" | Podman build host box: rootless builds, Trivy offline scanning, push to Nexus registry | "Podman for container builds — rootless by default, no daemon, SELinux compatible. Build the image, scan with Trivy offline, push to Nexus Docker registry. If I'm on my laptop, same thing: podman build locally, push to Nexus when ready." |
+| 12 | "Where do shared files and build caches go?" | NFS / shared storage box: artifacts, build caches, datasets, Git LFS backend | "NFS for shared storage — build caches so the runner doesn't re-download dependencies every run, shared datasets if teams need common test data, Git LFS backend for large files. Mounted by GitLab and the runner." |
+
+**After all 12:** Write the summary metrics and narrate:
+"The whole thing runs air-gapped. Software enters through the transfer process — approved, scanned, checksummed. Developers work locally: clone, code, build with Podman, test with Ansible, push to GitLab, pipeline validates, artifact lands in Nexus. No internet needed at any step."
+
+---
+
+## GAPS — Review Before Each Drawing Attempt
+
+> Add gaps here after each attempt. Read FIRST before redrawing.
+
+*(empty — fill in after your first attempt)*
+
+---
+
+## Mermaid Diagram (Answer Key)
+
+> Render this in mermaid.live after drawing from the 12 questions. Compare what you drew.
 
 ```mermaid
 ---
