@@ -77,10 +77,41 @@
 - Forgot to put "private subnets" label under RKE2 cluster and managed data services
 
 ### Before Next Attempt:
-1. Read the 12 questions above
+1. Read the 14 questions above
 2. Walk through each one ALOUD before touching paper
 3. THEN draw — let the questions guide what goes on the whiteboard
 4. Speak while drawing — the narration helps you remember
+
+---
+
+## HOW TO DRAW — Ansible Project Structure (8 Questions)
+
+> Andy asked about Ansible directly. If he says "walk me through how you bootstrapped RKE2 with Ansible," you need to draw the project structure and explain the flow.
+
+**"How did I automate bootstrapping every node in the cluster?"**
+
+| # | Question | What you draw | What you say |
+|---|----------|--------------|-------------|
+| 1 | "What nodes do I need to configure?" | Inventory box with 3 groups: control_plane (3 hosts with IPs), cpu_workers (hosts), gpu_workers (hosts). Shared vars at bottom: rke2_version, token, server_url, registry_endpoint | "Inventory defines three groups: three control plane nodes, CPU workers, GPU workers. Each has an IP. Shared variables set the RKE2 version, join token from Ansible Vault, the first server's URL, and the registry endpoint for air-gap." |
+| 2 | "What's the entry point?" | site.yml playbook box at the top with 3 plays listed | "One command: ansible-playbook site.yml. The master playbook runs three plays in order — common on all nodes, server on control plane, agent on workers. One command bootstraps the entire cluster." |
+| 3 | "What do ALL nodes need?" | Common role box: disable swap, load kernel modules (br_netfilter, overlay), set sysctl params (ip_forward, bridge-nf-call-iptables), open firewall ports (6443, 9345, 10250, 2379-2380, 8472/UDP) | "Common role runs on every node. Disable swap — K8s won't start with swap on. Load kernel modules so bridge traffic goes through iptables. Set network params for IP forwarding. Open all the ports RKE2 needs for API server, etcd, kubelet, VXLAN." |
+| 4 | "What do server nodes need?" | rke2-server role box: copy binary, copy air-gap images, template config.yaml, template registries.yaml, start rke2-server service, wait for API | "Server role: copy the RKE2 binary and pre-loaded images to the node. Template config.yaml — first node gets cluster-init true to bootstrap etcd, others get the server URL to join. Template registries.yaml to redirect all image pulls to ECR. Start the systemd service. Wait for the API server to respond before proceeding." |
+| 5 | "Why serial:1 for servers?" | Arrow between the 3 server nodes labeled "one at a time" | "Serial one means Ansible configures server nodes ONE AT A TIME. First node bootstraps etcd — creates the cluster. Second joins the existing cluster via port 9345. Third joins. If you start all three simultaneously, they'd each try to bootstrap independently — three separate clusters. Serial ensures ordered etcd quorum formation." |
+| 6 | "What do worker nodes need?" | rke2-agent role box: same binary + images copy, template config.yaml (simpler — just server URL + token + node labels), template registries.yaml, start rke2-agent service | "Agent role is simpler: same binary and images, but config.yaml just has the server URL, token, and node labels — like workload=gpu for GPU nodes. Starts rke2-agent instead of rke2-server. Workers join in PARALLEL — no ordering needed, they just register with the API server." |
+| 7 | "What are templates vs static files?" | templates/ box (config.yaml.j2, registries.yaml.j2) with arrow to "Jinja2 renders per node". files/ box (rke2 binary, images tarball) with arrow to "copied as-is" | "Templates use Jinja2 — variables get substituted per node. config.yaml.j2 has conditional logic: if this is the first server, set cluster-init true. If it's a joining server, set the server URL. registries.yaml.j2 fills in the registry endpoint from inventory vars. Static files — the binary and images tarball — just get copied as-is, no substitution." |
+| 8 | "What happens when config changes?" | handlers/ box with "restart rke2-server" and "restart rke2-agent". Arrow from config.yaml template to handler labeled "notify" | "Handlers. If the config.yaml template changes — say I update the token or add a TLS SAN — the task notifies the restart handler. Ansible restarts the rke2 service only if the config actually changed. If nothing changed, no restart. Idempotent." |
+
+**After drawing all 8:** Draw the execution flow across the bottom:
+
+```
+ansible-playbook site.yml
+  → Play 1: ALL nodes get common role (parallel)
+  → Play 2: control_plane gets rke2-server role (serial: 1 — one at a time)
+  → Play 3: cpu_workers + gpu_workers get rke2-agent role (parallel)
+  → Result: 3 HA servers + N workers, all registered, ready for ArgoCD
+```
+
+Say: "One command. Common role preps every node in parallel. Server role bootstraps control plane one at a time for etcd ordering. Agent role joins workers in parallel. Five minutes later: three-node HA cluster, workers registered, ArgoCD deploys everything else from Git."
 
 ---
 
