@@ -14,8 +14,8 @@
 | # | Question | What you draw | What you say |
 |---|----------|--------------|-------------|
 | 1 | "How do I get in and get on the network?" | Badge box, Laptop box (hardened RHEL, pre-loaded tools), cert auth → isolated VLAN | "Badge gets me in. Laptop is a hardened RHEL box — STIG'd, encrypted disk, pre-loaded with Git, Podman, Ansible, VS Code, SSH keys. Cert-based auth joins me to the air-gapped VLAN. No internet." |
-| 2 | "How does my laptop find services?" | Internal DNS (gitlab.dev.internal, nexus.dev.internal), NTP (local time — TLS needs synced clocks) | "Internal DNS resolves all services locally. Internal NTP because air-gapped can't reach public time servers — clocks must sync for TLS cert validation and log correlation." |
-| 3 | "What runs all the dev services?" | K8s cluster box (RKE2) inside the air-gapped network. Label: "All services run as pods, deployed via Helm charts, managed by ArgoCD" | "Everything runs on Kubernetes — RKE2 cluster inside the air-gapped network. Every service is a pod deployed via Helm charts stored in Nexus. ArgoCD syncs from a local Git repo — same GitOps pattern I used at NTConcepts and VivSoft." |
+| 2 | "How does my laptop find services?" | DNS server box (bind/dnsmasq — resolves gitlab.dev.internal etc.), NTP server box (chronyd — local time source, can't reach pool.ntp.org) | "Self-hosted DNS server running bind — resolves all service hostnames locally. Self-hosted NTP running chronyd — air-gapped can't reach public time servers. Clocks MUST sync for TLS cert validation and log correlation. Both run on bare-metal or VMs, not in the K8s cluster — they need to be up BEFORE the cluster boots." |
+| 3 | "What runs all the dev services?" | K8s cluster box (RKE2 on bare-metal nodes) inside the air-gapped network. Label: "All services run as pods, deployed via Helm charts, managed by ArgoCD" | "Everything runs on RKE2 — bare-metal nodes running Kubernetes. Same distribution I deployed at NTConcepts: bundled binary, embedded etcd, Canal CNI, CIS hardened. Every service is a pod deployed via Helm charts stored in Nexus. ArgoCD syncs from a local Git repo. Ansible bootstraps the nodes — same roles I wrote before." |
 | 4 | "Where does source code live?" | Inside K8s: GitLab pods — gitlab-webservice, gitaly (Git storage), gitlab-registry (built-in container registry), gitlab-runner | "GitLab CE runs as K8s pods. Webservice handles the UI and API. Gitaly is the Git storage backend — handles all git operations, stores repos on a PVC. Built-in container registry for images built by the pipeline. Runner pod with Podman executor runs CI/CD jobs." |
 | 5 | "How do I install packages and pull images?" | Inside K8s: Nexus pod — Docker registry, PyPI, RPM, npm, Helm repos all in one | "Nexus runs as a pod with a large PVC. One tool mirrors everything — container images from Iron Bank, Python packages, RHEL RPMs, npm, Go modules, Helm charts. All pre-transferred from the connected side. Developers point pip, dnf, and podman at Nexus — works like the public internet but local." |
 | 6 | "How do packages GET into the air-gap?" | Connected side box (OUTSIDE air-gap) → Diode/media (one-way, on the boundary) → Receiving station box (INSIDE air-gap) → unpacks into Nexus | "Connected side: mirror station uses skopeo to copy images, pip download for Python, reposync for RPMs — scans everything with Trivy, generates checksums. Transfers via diode — hardware-enforced one-way. Receiving station is INSIDE the air-gapped network: validates checksums, pushes images and packages into Nexus. For full platform deployments at scale, I'd use Zarf to bundle Helm charts + images together — but for populating package mirrors, direct mirroring is simpler." |
@@ -24,7 +24,7 @@
 | 9 | "Where do secrets live?" | Vault pod (Raft HA): SSH certs → test VMs, pipeline creds → runner | "Vault runs as a StatefulSet with Raft HA. SSH cert signing — Ansible gets short-lived certs per pipeline run to reach test VMs. Pipeline credentials, database passwords, API keys — all in Vault, never in Git." |
 | 10 | "How is traffic secured inside the cluster?" | Istio pod: mTLS pod-to-pod, ingress gateway. cert-manager + step-ca: internal PKI | "Istio service mesh — mTLS between all pods automatically. cert-manager with step-ca as the internal CA — can't use Let's Encrypt air-gapped. Issues and rotates TLS certs for the ingress gateway and Keycloak." |
 | 11 | "How do I know if something is broken?" | Prometheus + Grafana + Loki pods. Arrows: scrapes GitLab, Runner, Nexus | "Prometheus scrapes every service, Grafana for dashboards, Loki for logs. Pipeline success rates, runner utilization, Nexus disk usage — all visible without SSH'ing to anything." |
-| 12 | "Where does data persist?" | PostgreSQL StatefulSet (GitLab DB, Keycloak DB, SonarQube DB). NFS for Gitaly repos, build caches, artifacts | "PostgreSQL as a StatefulSet — databases for GitLab, Keycloak, SonarQube. PVCs with Retain policy for production. NFS for Git repos via Gitaly, build caches for the runner, shared artifacts. Data survives pod restarts." |
+| 12 | "Where does data persist?" | PostgreSQL StatefulSet (GitLab DB, Keycloak DB, SonarQube DB) with PVCs backed by local disk or NFS. NFS server (on-prem) for Gitaly repos, build caches, artifacts | "PostgreSQL as a StatefulSet — databases for GitLab, Keycloak, SonarQube. PVCs backed by local disk on the nodes or an on-prem NFS server — no EBS or EFS, this is bare-metal. Retain policy so data survives pod restarts. NFS server for Git repos via Gitaly, build caches for the runner, shared artifacts. One NFS box serves the whole cluster." |
 
 **After all 12:** Add ArgoCD arrow: "ArgoCD deploys ALL of these services from a local Git repo via Helm charts stored in Nexus. Same GitOps pattern as my VivSoft and NTConcepts platforms — push manifests to Git, ArgoCD syncs."
 
@@ -68,16 +68,16 @@ flowchart TD
     subgraph AirGapped_Network["Air-Gapped Network (no internet — isolated VLAN)"]
         direction TB
 
-        subgraph Network_Services["Core Network Services"]
-            DNS["Route53 Private Zone<br/>dev.internal<br/>gitlab.dev.internal → Ingress IP<br/>nexus.dev.internal → Ingress IP<br/>(or self-hosted bind/dnsmasq<br/>if fully on-prem)"]:::network
-            NTP["NTP<br/>AWS: 169.254.169.123 (built-in)<br/>On-prem: local chronyd server"]:::network
+        subgraph Network_Services["Core Network Services (bare-metal or VM)"]
+            DNS["DNS Server (bind / dnsmasq)<br/>dev.internal zone<br/>gitlab.dev.internal → Ingress IP<br/>nexus.dev.internal → Ingress IP<br/>vault.dev.internal → Ingress IP"]:::network
+            NTP["NTP Server (chronyd)<br/>local time source<br/>(air-gap can't reach pool.ntp.org<br/>— clocks must sync for TLS + logs)"]:::network
         end
 
         subgraph Receive_Station["Receiving Station (inside air-gap)"]
             Receive["Receive + Validate<br/>- Validate checksums (sha256)<br/>- Unpack archives<br/>- Push images → Nexus Docker<br/>- Push packages → Nexus repos<br/>- Log every transfer for audit"]:::transfer
         end
 
-        subgraph K8s_Cluster["Kubernetes Cluster (RKE2 — all services run as pods)"]
+        subgraph K8s_Cluster["RKE2 Kubernetes Cluster (bare-metal nodes — all services run as pods)"]
             direction TB
 
             subgraph Infra_Services["Infrastructure Services (deployed via Helm + ArgoCD)"]
@@ -113,12 +113,12 @@ flowchart TD
 
             subgraph Data_Layer["Persistent Data (PVCs → PVs)"]
                 PG["PostgreSQL<br/>(StatefulSet)<br/>- GitLab DB<br/>- Keycloak DB<br/>- SonarQube DB"]:::data
-                NFS["NFS / EFS<br/>- Git repos (Gitaly)<br/>- Build caches<br/>- Shared artifacts"]:::data
+                NFS["NFS Server (on-prem)<br/>- Git repos (Gitaly storage)<br/>- Build caches (runner)<br/>- Shared artifacts"]:::data
             end
         end
 
         subgraph Test_Targets["Ansible Test Targets (standalone VMs — outside K8s cluster)"]
-            TestVM["Test EC2 instances / VMs<br/>- Disposable 'practice servers'<br/>- Pipeline runs ansible-playbook here<br/>- Validates: does the playbook work?<br/>- If yes → safe to run in production<br/>- If no → pipeline fails, dev fixes"]:::infra
+            TestVM["Test VMs (bare-metal or hypervisor)<br/>- Disposable 'practice servers'<br/>- Pipeline runs ansible-playbook here<br/>- Validates: does the playbook work?<br/>- If yes → safe to run in production<br/>- If no → pipeline fails, dev fixes"]:::infra
         end
     end
 
@@ -200,30 +200,35 @@ flowchart TD
 
 ### Design Narration (how to walk Taylor through it)
 
-**"Day one. Badge in, boot the laptop — hardened RHEL, pre-loaded tools. Cert auth to join the air-gapped VLAN. No internet.**
+**"Day one. Badge in, boot the laptop — hardened RHEL, pre-loaded tools. Cert auth to join the air-gapped VLAN. No internet. No cloud. Fully on-prem.**
 
-**Everything runs on a K8s cluster inside the air-gapped network — same pattern I used at NTConcepts and VivSoft. Every service is a pod deployed via Helm charts managed by ArgoCD.**
+**Core network services first: self-hosted DNS running bind for name resolution — gitlab.dev.internal, nexus.dev.internal. Self-hosted NTP running chronyd — clocks must sync for TLS and logging. These run on bare-metal or VMs, NOT in the K8s cluster — they need to be up before the cluster boots.**
 
-**Source code: GitLab CE — webservice pod for the UI, gitaly pod for Git storage, built-in registry pod for container images, runner pod for CI/CD. All running in the cluster, all backed by PostgreSQL StatefulSets and NFS for persistent storage.**
+**Everything else runs on RKE2 — Kubernetes on bare-metal nodes. Same distribution I deployed at NTConcepts: bundled binary, embedded etcd, Canal CNI, CIS hardened. Ansible bootstraps the nodes — same roles I wrote before. Every service is a pod deployed via Helm charts managed by ArgoCD from a local Git repo.**
 
-**Packages: Nexus pod mirrors everything — container images, Python, RPM, npm, Go, Helm charts. One tool, all package types. Developers point their package managers at Nexus — works like the public internet but fully local.**
+**Source code: GitLab CE as K8s pods — webservice for the UI, gitaly for Git storage, built-in registry for container images, runner with Podman executor for CI/CD. All backed by PostgreSQL StatefulSets and an on-prem NFS server for persistent storage.**
 
-**How packages get in: on the connected side, a bundle station pulls from the internet, scans with Trivy, packages into Zarf-style archives with checksums. Transfer via diode — one-way hardware into the air-gap. Receiving station INSIDE the network validates checksums and unpacks into Nexus. Auditable, automated.**
+**Packages: Nexus pod mirrors everything — container images, Python, RPM, npm, Go, Helm charts. One tool, all package types. Developers point pip, dnf, and podman at Nexus — works like the public internet but fully local.**
 
-**Pipeline: push code to GitLab → runner triggers → lint, build with Podman, scan with SonarQube, test by deploying Ansible to a test VM, push passing artifact to Nexus. All automated — no manual steps.**
+**How packages get in: on the connected side — a SEPARATE network with internet — a mirror station uses skopeo to copy images, pip download for Python, reposync for RPMs. Scans everything with Trivy, generates checksums. Transfer via physical diode — one-way hardware, data flows in only. Receiving station INSIDE the air-gapped network validates checksums and pushes into Nexus. Every transfer logged.**
 
-**Security: Keycloak pod for SSO — one login for everything. Vault pod in Raft HA for secrets — SSH certs, pipeline credentials, database passwords. Istio mesh for mTLS between pods. cert-manager with step-ca as the internal CA for TLS certificates.**
+**Pipeline: push code to GitLab → runner triggers → lint, build with Podman, scan with SonarQube, test by deploying Ansible to a test VM — a disposable bare-metal or VM target. Push passing artifact to Nexus.**
 
-**Observability: Prometheus, Grafana, Loki — all pods inside the cluster. Zero internet. Full visibility into pipeline health, runner utilization, service status.**
+**Security: Keycloak pod for SSO — one login for everything. Vault pod in Raft HA for secrets — SSH certs for Ansible, pipeline credentials, database passwords. Istio mesh for mTLS between pods. cert-manager with step-ca as the internal CA — self-hosted, no Let's Encrypt.**
 
-**The whole environment is reproducible from Git — ArgoCD syncs everything. Need a second environment? Deploy the same Helm charts to a new cluster. Need to update a service? Push to Git, ArgoCD syncs. Drift? ArgoCD detects and reverts. Same GitOps pattern I've built twice before."**
+**Observability: Prometheus, Grafana, Loki — all pods inside the cluster. Full visibility, zero internet dependency.**
+
+**The whole environment is reproducible from Git. Need a second environment? Ansible bootstraps new nodes, ArgoCD deploys the same Helm charts. Same GitOps pattern I've built at NTConcepts and VivSoft — just on bare-metal instead of cloud."**
 
 ### Architectural Decisions / Tradeoffs Andy or Taylor Might Probe
 
 | Decision | Why | Alternative rejected |
 |----------|-----|---------------------|
-| GovCloud + VPC endpoints over on-prem | Elastic compute, managed services (RDS, EFS), VPC endpoints for private access. Same air-gap posture — no internet, just private AWS paths. Matches NTConcepts experience. | On-prem: full ownership but more ops overhead — manage your own DNS, NTP, storage. I'd explain both approaches to Taylor. |
-| K8s (RKE2) for all services over bare-metal installs | Every service as a pod — declarative, reproducible, GitOps-managed via ArgoCD. Need a new environment? Deploy same Helm charts. | Bare-metal: each service installed manually, config drift, no rollback, hard to reproduce. Same problems I fixed at IBM. |
+| Fully on-prem over GovCloud | True air-gap — no cloud dependency, no internet paths at all. Full ownership. Matches Anduril's on-prem programs. More ops overhead (self-hosted DNS, NTP, storage) but zero cloud vendor risk. | GovCloud: managed services are easier but adds cloud dependency. For true air-gap, on-prem is the honest answer. |
+| RKE2 on bare-metal over EKS | No cloud control plane dependency. Bundled binary, embedded etcd, runs fully disconnected. CIS hardened, FIPS ready. Ansible bootstraps nodes — same roles I wrote at NTConcepts. | EKS: managed but requires internet for control plane API. Can't run truly air-gapped. |
+| Self-hosted PostgreSQL (StatefulSet) over RDS | Runs inside the cluster, no cloud dependency. StatefulSet gives stable identity + dedicated PVCs. | RDS: managed but requires VPC endpoints and cloud account — defeats on-prem purpose. |
+| On-prem NFS over EFS | Dedicated NFS server — simple, reliable, no cloud. One box serves the cluster. | EFS: managed NFS but cloud-dependent. On-prem NFS is standard for air-gapped. |
+| K8s (RKE2) for all services over manual installs | Every service as a pod — declarative, reproducible, GitOps via ArgoCD. Need a new environment? Ansible + same Helm charts. | Manual installs: config drift, no rollback, hard to reproduce. Same problems I fixed at IBM. |
 | GitLab CE over GitHub Enterprise | Self-hosted, free, built-in container registry and runners. Runs as K8s pods. | GitHub requires license, less self-contained for air-gap |
 | Nexus over Artifactory | Handles ALL repo types in one tool (Docker, PyPI, RPM, npm, Helm). Free OSS version. | Artifactory is more feature-rich but costs money, more complex setup |
 | Podman over Docker | Rootless by default, daemonless, SELinux compatible. Anduril already uses Podman. | Docker requires daemon as root — bigger attack surface |
