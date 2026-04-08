@@ -1,7 +1,9 @@
 # Priority 1: Ansible + GitLab Debugging — Study Guide
 
 > **For:** Taylor's Monday hands-on (12:00-12:45 — FIRST round, you walk in cold)
-> **Scenario:** Given a buggy Ansible-based GitLab CI/CD project that deploys to an EC2 instance. Find and fix: GitLab config issues, Ansible config/code issues, pipeline problems.
+> **Scenario:** Given a buggy Ansible-based GitLab CI/CD project that deploys to a target host. **AIR-GAPPED environment** — no internet. Local GitLab, local Nexus, local DNS. Find and fix: GitLab config issues, Ansible config/code issues, pipeline problems, AND air-gap specific failures.
+> 
+> **The #1 bug category in air-gap: things that assume internet access.** Every public registry pull, every pip install, every Galaxy download, every external URL — all broken. Train your eyes to spot these FIRST.
 
 ## Everything you need is in THIS directory. Read in order.
 
@@ -18,7 +20,7 @@
 | Time | File | What to do |
 |------|------|-----------|
 | 1 hr | `03-gitlab-ci-fundamentals.md` | Read. Focus on: .gitlab-ci.yml structure, stages, variables, runners, artifacts. |
-| 1.5 hrs | `04-gitlab-debugging.md` | Read every section. Runner problems, pipeline failures, config errors, Podman executor issues. |
+| 1.5 hrs | `04-gitlab-debugging.md` | **START with Section 0: Air-Gap Specific Failures.** Then: runner problems, pipeline failures, config errors, Podman executor issues. |
 | 30 min | `drill-02-fix-gitlab-pipeline.yml` | Do it. Find all 6 bugs. Check `drill-02-answers.yml`. |
 
 ### Day 3 — Runner + Remote Hosts
@@ -33,7 +35,7 @@
 
 | Time | File | What to do |
 |------|------|-----------|
-| 1.5 hrs | `drill-04-full-scenario.md` | **This simulates Taylor's exact scenario.** Buggy Ansible + GitLab deploying to EC2. Find ALL bugs. No AI, no Google. Talk through your process aloud. |
+| 1.5 hrs | `drill-04-full-scenario.md` | **This simulates Taylor's exact scenario.** Buggy Ansible + GitLab deploying to a target host IN AN AIR-GAPPED ENVIRONMENT. 19 bugs: 15 config/syntax + 4 air-gap. Find ALL. No AI, no Google. Talk through your process aloud. |
 | 30 min | `drill-04-answers.md` | Check your work. Note what you missed. |
 | 30 min | Review | Re-read `02-ansible-common-bugs.md` + `04-gitlab-debugging.md` for anything you missed. |
 
@@ -56,7 +58,8 @@ Based on the recruiter's description:
 ## How to Approach the Exercise
 
 1. **Read everything first** — don't start fixing immediately. Scan all files.
-2. **Start with the pipeline** — is .gitlab-ci.yml syntactically valid? Are stages ordered correctly? Is the runner configured right?
-3. **Then check Ansible** — is the playbook syntactically valid? Are module params correct? Is become set? Do handlers match notify?
-4. **Then check connectivity** — can the runner reach the target host? SSH keys? Inventory correct? Security groups?
-5. **Talk through your thinking** — Taylor evaluates your PROCESS, not just the answer.
+2. **CHECK AIR-GAP FIRST** — scan every line for internet assumptions: public images, pip install, galaxy downloads, external URLs, public DNS. These are the bugs that show you understand the environment.
+3. **Then check the pipeline** — is .gitlab-ci.yml syntactically valid? Are stages ordered correctly? Is the runner configured right? Tags match?
+4. **Then check Ansible** — is the playbook syntactically valid? Are module params correct? Is become set? Do handlers match notify? Mode quoted?
+5. **Then check connectivity** — can the runner reach the target host? SSH keys? Inventory correct? Port open?
+6. **Talk through your thinking** — Taylor evaluates your PROCESS, not just the answer. Say: "First thing I notice is this image pulls from Docker Hub — that won't work air-gapped. Fix: point to the local registry."
