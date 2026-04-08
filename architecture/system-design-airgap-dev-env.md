@@ -26,9 +26,10 @@
 | 11 | "How do I know if something is broken?" | Prometheus + Grafana + Loki pods. Arrows: scrapes GitLab, Runner, Nexus | "Prometheus scrapes every service, Grafana for dashboards, Loki for logs. Pipeline success rates, runner utilization, Nexus disk usage — all visible without SSH'ing to anything." |
 | 12 | "Where does data persist?" | PostgreSQL StatefulSet (GitLab DB, Keycloak DB, SonarQube DB) with PVCs backed by local disk or NFS. NFS server (on-prem) for Gitaly repos, build caches, artifacts | "PostgreSQL as a StatefulSet — databases for GitLab, Keycloak, SonarQube. PVCs backed by local disk on the nodes or an on-prem NFS server — no EBS or EFS, this is bare-metal. Retain policy so data survives pod restarts. NFS server for Git repos via Gitaly, build caches for the runner, shared artifacts. One NFS box serves the whole cluster." |
 
-**After all 12:** Add ArgoCD arrow: "ArgoCD deploys ALL of these services from a local Git repo via Helm charts stored in Nexus. Same GitOps pattern as my VivSoft and NTConcepts platforms — push manifests to Git, ArgoCD syncs."
+| 13 | "How does all of this get stood up?" | Ansible box (bootstraps RKE2 nodes — same roles as Nightwatch). ArgoCD repo box on local GitLab: apps/ directory + charts/ directory. DevOps engineer manages both. | "Two tools. Ansible bootstraps the bare-metal nodes — same common/server/agent roles I wrote at NTConcepts. Once the RKE2 cluster is running, ArgoCD takes over. The ArgoCD repo — hosted on the local GitLab — has two directories: apps/ with an Application YAML per service, and charts/ with the Helm chart for each service. ArgoCD polls the repo, syncs everything. No Terraform — bare-metal doesn't need cloud provisioning. Ansible for nodes, ArgoCD for services." |
+| 14 | "What does the ArgoCD repo look like inside?" | Draw the directory: apps/ has one YAML per service (gitlab.yaml, nexus.yaml, vault.yaml, etc). charts/ has one Helm chart dir per service. App-of-apps pattern: one parent Application points to apps/, ArgoCD discovers all children. | "apps directory has one Application YAML per service — each one says 'deploy this Helm chart from charts/ to this namespace.' charts directory has the Helm charts — values.yaml for config, templates/ for K8s manifests. App-of-apps pattern: one parent Application points to apps/, ArgoCD discovers everything automatically. Add a new service? Write the chart, write the Application YAML, push to Git. ArgoCD handles the rest." |
 
-Then narrate: "The whole thing runs air-gapped on K8s. Every service is a pod — GitLab, Nexus, Vault, Keycloak, monitoring, all deployed via Helm. Software enters through the transfer process — scanned, checksummed, one-way. Developers clone, code, build with Podman, push to GitLab, pipeline validates, artifact lands in Nexus. No internet at any step. And because it's K8s with ArgoCD, the whole environment is reproducible from Git — I can spin up a second environment by deploying the same Helm charts."
+**After all 14:** Narrate: "The whole thing runs air-gapped on bare-metal K8s. Ansible bootstraps the nodes, ArgoCD deploys every service from Git. Software enters through the physical diode — scanned, checksummed, one-way. Developers clone, code, build with Podman, push to GitLab, pipeline validates, artifact lands in Nexus. No internet, no cloud. And because it's K8s with ArgoCD, the whole environment is reproducible — spin up another environment by running the same Ansible playbook and letting ArgoCD sync the same Helm charts."
 
 ---
 
@@ -187,6 +188,30 @@ flowchart TD
     %% Ingress
     Istio_Dev -- "routes external<br/>traffic to services" --> Dev_Tools
 
+    %% BOOTSTRAP: How the cluster + services get set up
+    subgraph Bootstrap["Infrastructure Bootstrap (how it all gets stood up)"]
+        Ansible_Boot["Ansible<br/>(bootstraps RKE2 nodes)<br/>- common role: swap, kernel,<br/>  firewall, sysctl<br/>- rke2-server role: binary,<br/>  config.yaml, registries.yaml<br/>- rke2-agent role: workers<br/>- serial:1 for etcd ordering"]:::iac
+    end
+
+    subgraph GitOps_Repo["ArgoCD Git Repository (hosted on local GitLab)"]
+        ArgoRepo["devenv-argoflow repo<br/>(source of truth for all K8s services)"]:::gitops
+        subgraph Repo_Structure["Repo Structure"]
+            direction LR
+            Apps_Dir["apps/<br/>├── gitlab.yaml<br/>├── nexus.yaml<br/>├── vault.yaml<br/>├── keycloak.yaml<br/>├── sonarqube.yaml<br/>├── monitoring.yaml<br/>├── istio.yaml<br/>└── cert-manager.yaml"]:::gitops
+            Charts_Dir["charts/<br/>├── gitlab/ (Helm chart)<br/>├── nexus/ (Helm chart)<br/>├── vault/ (Helm chart)<br/>├── keycloak/ (Helm chart)<br/>├── sonarqube/ (Helm chart)<br/>├── monitoring/ (Helm chart)<br/>├── istio/ (Helm chart)<br/>└── cert-manager/ (Helm chart)"]:::gitops
+        end
+    end
+
+    %% Bootstrap flow
+    Ansible_Boot -- "bootstraps bare-metal nodes<br/>(installs RKE2, starts cluster)" --> K8s_Cluster
+    ArgoRepo -. "ArgoCD polls every 3 min<br/>syncs Helm charts to cluster" .-> ArgoCD_Dev
+    Apps_Dir -- "Application YAMLs<br/>define what to deploy" --> ArgoRepo
+    Charts_Dir -- "Helm charts<br/>define how to deploy" --> ArgoRepo
+
+    %% DevOps Engineer manages the repo
+    DevOps["DevOps Engineer"]:::user -- "manages ArgoCD repo +<br/>Ansible playbooks" --> ArgoRepo
+    DevOps -- "runs ansible-playbook<br/>for node bootstrap" --> Ansible_Boot
+
     classDef physical fill:#d4edda,stroke:#155724,stroke-width:2px
     classDef network fill:#fce4ec,stroke:#c62828,stroke-width:2px
     classDef service fill:#cce5ff,stroke:#004085,stroke-width:2px
@@ -196,6 +221,7 @@ flowchart TD
     classDef transfer fill:#e2e3e5,stroke:#383d41,stroke-width:2px
     classDef user fill:#d5e8d4,stroke:#82b366,stroke-width:2px
     classDef data fill:#d4edda,stroke:#155724,stroke-width:2px
+    classDef iac fill:#d5e8d4,stroke:#82b366,stroke-width:2px
 ```
 
 ### Design Narration (how to walk Taylor through it)
