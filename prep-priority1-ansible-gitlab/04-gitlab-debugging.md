@@ -1,6 +1,104 @@
 # GitLab CI/CD Debugging — Common Problems & How to Fix Them
 
-> Taylor's scenario involves a buggy GitLab CI/CD setup deploying via Ansible. These are the problems you'll encounter.
+> Taylor's scenario involves a buggy GitLab CI/CD setup deploying via Ansible in an AIR-GAPPED environment. These are the problems you'll encounter — both general bugs AND air-gap specific failures.
+
+---
+
+## 0. Air-Gap Specific Failures (CHECK THESE FIRST)
+
+> In an air-gapped environment, the #1 category of bugs is: **things that assume internet access.** Scan every line for external URLs, public registries, or package manager commands.
+
+### Image pulls from public registries
+```yaml
+# BAD — pulls from Docker Hub (no internet)
+image: python:3.11
+image: docker:latest
+image: alpine:3.18
+
+# GOOD — pulls from local Nexus/Harbor registry
+image: registry.local/python:3.11
+image: nexus.dev.internal/rhel9:latest
+```
+**Symptom:** Job stuck in pending, then fails with `image pull failed` or `connection timed out`
+
+### Package installs from public repos
+```yaml
+# BAD — reaches PyPI (no internet)
+script:
+  - pip install ansible-lint
+
+# GOOD — uses local Nexus PyPI mirror
+script:
+  - pip install --index-url https://nexus.local/repository/pypi/simple --trusted-host nexus.local ansible-lint
+# OR: pre-install in the runner image so no pip install needed at all
+```
+**Symptom:** `pip install` hangs, then fails with `Could not find a version that satisfies the requirement` or `Connection timed out`
+
+### Ansible Galaxy role downloads
+```yaml
+# BAD — downloads from galaxy.ansible.com (no internet)
+script:
+  - ansible-galaxy install -r requirements.yml
+
+# GOOD — roles pre-bundled in the project repo
+# Include role source code directly under roles/ directory
+# No Galaxy download needed
+```
+**Symptom:** `ansible-galaxy install` hangs, then fails with `Connection timed out` or `Could not find role`
+
+### URLs in playbooks
+```yaml
+# BAD — downloads from the internet
+- name: Download package
+  get_url:
+    url: https://github.com/some/release/v1.0.tar.gz
+    dest: /tmp/
+
+# GOOD — host it on local Nexus raw repo
+- name: Download package
+  get_url:
+    url: https://nexus.local/repository/raw/packages/v1.0.tar.gz
+    dest: /tmp/
+```
+**Symptom:** Task hangs on `get_url`, then fails with timeout
+
+### DNF/YUM repos pointing to internet
+```yaml
+# BAD — yum tries to reach mirrorlist.centos.org
+- name: Install packages
+  yum:
+    name: nginx
+    state: present
+# Default RHEL repos point to internet CDNs
+
+# GOOD — configure local repo mirror first
+- name: Configure local repo
+  yum_repository:
+    name: local-rhel
+    description: Local RHEL mirror
+    baseurl: https://nexus.local/repository/rhel-rpms/
+    gpgcheck: no
+```
+**Symptom:** `yum install` fails with `Cannot find a valid baseurl for repo` or hangs trying to reach mirrors
+
+### DNS resolution for internal services
+```yaml
+# BAD — assumes public DNS works
+ansible_host: webserver.example.com
+
+# GOOD — use internal DNS name or direct IP
+ansible_host: web-server.dev.internal    # resolved by local DNS
+# OR
+ansible_host: 10.0.1.50                 # direct IP — always works
+```
+**Symptom:** `Could not resolve host` or `Name or service not known`
+
+### The Air-Gap Debugging Mindset
+**Every time you see a failure in an air-gapped environment, ask:**
+1. Is this trying to reach the internet? (URL, public registry, package manager default)
+2. Is DNS resolving? (internal DNS must know this hostname)
+3. Is the local mirror/registry configured? (registries.conf, pip.conf, yum repos)
+4. Is the resource pre-staged? (images in Nexus, packages in Nexus, roles in the project)
 
 ---
 

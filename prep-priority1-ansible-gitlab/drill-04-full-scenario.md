@@ -1,8 +1,9 @@
 # Drill 04: Taylor's Exact Scenario — Find ALL the Bugs
 
-> **Scenario:** You're given a GitLab CI/CD project that uses Ansible to deploy a web server to an EC2 instance. The runner uses Podman executor. Everything is broken. Find and fix every bug.
+> **Scenario:** You're given a GitLab CI/CD project that uses Ansible to deploy a web server to a target host. The runner uses Podman executor. The environment is AIR-GAPPED — no internet access. Local GitLab, local Nexus registry, local DNS. Everything is broken — syntax bugs, config bugs, AND air-gap bugs. Find and fix every bug.
 > 
 > **Rules:** No AI. No Google. Talk through your process aloud. Time yourself — 30 minutes.
+> **Think air-gap:** Every time you see something that assumes internet access, flag it.
 
 ---
 
@@ -20,9 +21,9 @@ variables:
 
 lint:
   stage: lint
-  image: registry.local/python:3.11
+  image: python:3.11                    # ← look at this image source
   script:
-    - pip install ansible-lint
+    - pip install ansible-lint          # ← think about air-gap
     - ansible-lint playbooks/deploy-webserver.yml
   tag:
     - ansible
@@ -34,6 +35,7 @@ deploy:
     - eval $(ssh-agent -s)
     - ssh-add $SSH_PRIVATE_KEY
   script:
+    - ansible-galaxy install -r requirements.yml    # ← think about air-gap
     - ansible-playbook -i $INVENTORY playbooks/deploy-webserver.yml
   only:
     - main
@@ -88,11 +90,18 @@ all:
 ---
 - name: Deploy web server
   hosts: web-servers
+  roles:
+    - role: geerlingguy.nginx          # ← think about air-gap
   tasks:
     - name: Install nginx
       yum:
         name: nginx
         state: installed
+
+    - name: Download custom module
+      get_url:
+        url: https://example.com/modules/custom-module.tar.gz    # ← think about air-gap
+        dest: /tmp/custom-module.tar.gz
 
     - name: Copy nginx config
       template:
@@ -155,4 +164,4 @@ Why:
 (repeat for each bug)
 ```
 
-**How many bugs total?** (check against answers — there are 15)
+**How many bugs total?** (check against answers — there are 19: 15 config/syntax bugs + 4 air-gap bugs)

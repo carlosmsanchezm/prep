@@ -1,8 +1,34 @@
-# Drill 04 Answers — 15 Bugs
+# Drill 04 Answers — 19 Bugs (15 config/syntax + 4 air-gap)
 
 ---
 
-## .gitlab-ci.yml (6 bugs)
+## AIR-GAP BUGS (the ones that show you understand the environment)
+
+**Air-Gap Bug 1:** `image: python:3.11` — pulls from Docker Hub
+- No internet in air-gap → image pull fails → job never starts
+- Fix: `image: registry.local/python:3.11` (pull from local Nexus registry)
+- Why: Every image must come from the local registry. Nothing from docker.io, ghcr.io, or any public source.
+
+**Air-Gap Bug 2:** `pip install ansible-lint` — tries to reach PyPI
+- No internet → pip can't resolve pypi.org → install fails
+- Fix: Either pre-install ansible-lint in the runner image, OR configure pip to use local Nexus PyPI mirror: `pip install --index-url https://nexus.local/repository/pypi/simple ansible-lint`
+- Why: Package managers default to public repositories. In air-gap, every package manager must point to local mirrors.
+
+**Air-Gap Bug 3:** `ansible-galaxy install -r requirements.yml` — tries to reach Galaxy
+- No internet → can't download roles from galaxy.ansible.com
+- Fix: Pre-download roles on the connected side, include them in the project repo under `roles/`, or use a local Galaxy proxy in Nexus. Remove the galaxy install line and reference local roles.
+- Why: ansible-galaxy is like pip — defaults to public servers. Air-gap means pre-bundle everything.
+
+**Air-Gap Bug 4:** `role: geerlingguy.nginx` + `get_url: https://example.com/...` in the playbook
+- Both try to reach the internet. The role download fails (Galaxy), the get_url times out.
+- Fix for role: Include the role source code directly in your project's `roles/` directory instead of referencing a Galaxy role. Fix for get_url: Host the file on Nexus or a local HTTP server: `url: https://nexus.local/repository/raw/modules/custom-module.tar.gz`
+- Why: In air-gap, NOTHING downloads from external URLs. Every dependency must be pre-staged locally.
+
+**How to spot air-gap bugs:** Read every line and ask: "Does this assume internet access?" Any URL, any public registry, any package manager command without a `--index-url` or local source is a bug in an air-gapped environment.
+
+---
+
+## .gitlab-ci.yml (6 config/syntax bugs)
 
 **Bug 1:** `ANSIBLE_HOST_KEY_CHECKING: True` should be `"False"`
 - True means SSH will fail on first connection (no known_hosts in CI)
