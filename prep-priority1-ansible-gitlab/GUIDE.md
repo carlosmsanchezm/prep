@@ -1,0 +1,62 @@
+# Priority 1: Ansible + GitLab Debugging — Study Guide
+
+> **For:** Taylor's Monday hands-on (12:00-12:45 — FIRST round, you walk in cold)
+> **Scenario:** Given a buggy Ansible-based GitLab CI/CD project that deploys to an EC2 instance. Find and fix: GitLab config issues, Ansible config/code issues, pipeline problems.
+
+## Everything you need is in THIS directory. Read in order.
+
+### Day 1 — Ansible Foundations + Bug Spotting
+
+| Time | File | What to do |
+|------|------|-----------|
+| 1.5 hrs | `01-ansible-fundamentals.md` | Read. Focus on: playbook structure, 15 core modules, handlers, role directory, vault. This is the baseline. |
+| 1 hr | `02-ansible-common-bugs.md` | Read every bug pattern. These are what Taylor will plant in the exercise. |
+| 30 min | `drill-01-fix-ansible-playbook.yml` | Do it. Find all 8 bugs. Check `drill-01-answers.yml`. |
+
+### Day 2 — GitLab CI/CD + Debugging
+
+| Time | File | What to do |
+|------|------|-----------|
+| 1 hr | `03-gitlab-ci-fundamentals.md` | Read. Focus on: .gitlab-ci.yml structure, stages, variables, runners, artifacts. |
+| 1.5 hrs | `04-gitlab-debugging.md` | Read every section. Runner problems, pipeline failures, config errors, Podman executor issues. |
+| 30 min | `drill-02-fix-gitlab-pipeline.yml` | Do it. Find all 6 bugs. Check `drill-02-answers.yml`. |
+
+### Day 3 — Runner + Remote Hosts
+
+| Time | File | What to do |
+|------|------|-----------|
+| 45 min | `05-podman-for-runners.md` | Read. How Podman executor works, DOCKER_HOST, rootless, SELinux. |
+| 45 min | `06-ansible-to-ec2.md` | Read. SSH, inventory, become, key auth, common connection errors. |
+| 30 min | `drill-03-ansible-role-structure.md` | Do it. Design a full role. Check `drill-03-answers.md`. |
+
+### Day 4 — Full Scenario (Taylor's Exercise)
+
+| Time | File | What to do |
+|------|------|-----------|
+| 1.5 hrs | `drill-04-full-scenario.md` | **This simulates Taylor's exact scenario.** Buggy Ansible + GitLab deploying to EC2. Find ALL bugs. No AI, no Google. Talk through your process aloud. |
+| 30 min | `drill-04-answers.md` | Check your work. Note what you missed. |
+| 30 min | Review | Re-read `02-ansible-common-bugs.md` + `04-gitlab-debugging.md` for anything you missed. |
+
+### Day 5 (Sunday) — Light Review
+
+| Time | File | What to do |
+|------|------|-----------|
+| 30 min | Redo weakest drill | Whichever drill you missed the most bugs on. |
+| 30 min | Skim `02` + `04` | Bug patterns + debugging patterns — quick scan. |
+| | **REST** | Trust the prep. |
+
+## What Taylor Will Test
+
+Based on the recruiter's description:
+1. **Read broken configs** — .gitlab-ci.yml, ansible.cfg, playbook.yml, inventory
+2. **Identify what's wrong** — syntax errors, logical errors, config mismatches
+3. **Explain your debugging process** — "I'd check X first because..."
+4. **Suggest fixes** — not just "it's broken" but "here's the fix and why"
+
+## How to Approach the Exercise
+
+1. **Read everything first** — don't start fixing immediately. Scan all files.
+2. **Start with the pipeline** — is .gitlab-ci.yml syntactically valid? Are stages ordered correctly? Is the runner configured right?
+3. **Then check Ansible** — is the playbook syntactically valid? Are module params correct? Is become set? Do handlers match notify?
+4. **Then check connectivity** — can the runner reach the target host? SSH keys? Inventory correct? Security groups?
+5. **Talk through your thinking** — Taylor evaluates your PROCESS, not just the answer.

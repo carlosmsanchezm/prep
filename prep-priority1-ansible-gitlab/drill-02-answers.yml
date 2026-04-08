@@ -1,0 +1,68 @@
+# Day 2 ANSWERS: Pipeline Read and Fix
+
+# Bug 1: Using :latest tag instead of commit SHA
+#   :latest is mutable — you can't trace what was deployed
+#   Fix: $IMAGE:$CI_COMMIT_SHA (or $CI_COMMIT_SHORT_SHA)
+
+# Bug 2: Trivy should fail the pipeline on HIGH/CRITICAL vulnerabilities
+#   Without --exit-code 1, Trivy always exits 0 even with vulns
+#   Fix: trivy image --exit-code 1 --severity HIGH,CRITICAL $IMAGE:$CI_COMMIT_SHA
+
+# Bug 3: allow_failure: true on a security scan means vulns won't block deploy
+#   The whole point of scanning is to gate deployments
+#   Fix: remove allow_failure (or set to false)
+
+# Bug 4: Typo — "enviroment" should be "environment"
+#   GitLab silently ignores unknown keys, so this would be missed
+
+# Bug 5: Missing quotes around "main"
+#   if: $CI_COMMIT_BRANCH == main → main is interpreted as a variable
+#   Fix: if: $CI_COMMIT_BRANCH == "main"
+
+# Bug 6: Production should require manual approval
+#   Without "when: manual", production deploys automatically on every merge to main
+#   Fix: add "when: manual" to the rules
+
+# CORRECTED pipeline:
+
+stages:
+  - build
+  - scan
+  - deploy
+
+variables:
+  REGISTRY: registry.local:5000
+  IMAGE: $REGISTRY/my-app
+
+build-image:
+  stage: build
+  script:
+    - docker build -t $IMAGE:$CI_COMMIT_SHA .          # FIXED: commit SHA tag
+    - docker push $IMAGE:$CI_COMMIT_SHA
+
+scan-image:
+  stage: scan
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $IMAGE:$CI_COMMIT_SHA  # FIXED
+  # FIXED: removed allow_failure
+
+deploy-staging:
+  stage: deploy
+  script:
+    - kubectl set image deployment/my-app my-app=$IMAGE:$CI_COMMIT_SHA
+    - kubectl rollout status deployment/my-app
+  environment:                                          # FIXED: typo
+    name: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"                   # FIXED: quotes
+
+deploy-production:
+  stage: deploy
+  script:
+    - kubectl set image deployment/my-app my-app=$IMAGE:$CI_COMMIT_SHA
+    - kubectl rollout status deployment/my-app
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual                                      # FIXED: require approval

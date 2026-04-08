@@ -1,0 +1,74 @@
+# Day 1: Ansible Read and Fix
+# This playbook has 8 bugs. Find and fix them all.
+# Don't run it — just read and fix by eye.
+# Write the corrected version below the original.
+
+---
+- name: Configure web server
+  hosts: webservers
+  become: yes
+  tasks:
+    # Bug 1: What's wrong with this package install?
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: installed
+
+    # Bug 2: What's wrong with this service task?
+    - name: Start nginx
+      service:
+        name: nginx
+        state: running
+        enabled: true
+
+    # Bug 3: What's wrong with this file copy?
+    - name: Copy nginx config
+      copy:
+        src: nginx.conf
+        dest: /etc/nginx/nginx.conf
+        mode: 644
+
+    # Bug 4: What's wrong with this handler reference?
+    - name: Update site config
+      template:
+        src: site.conf.j2
+        dest: /etc/nginx/sites-available/default
+      notify: Restart Nginx
+
+    # Bug 5: What's wrong with this conditional?
+    - name: Install certbot on Ubuntu only
+      apt:
+        name: certbot
+      when: ansible_os_family = "Debian"
+
+    # Bug 6: What's wrong with this user creation?
+    - name: Create deploy user
+      user:
+        name: deploy
+        groups: www-data
+        shell: /bin/bash
+        append: false
+
+    # Bug 7: What's wrong with this firewall rule?
+    - name: Open HTTP port
+      firewalld:
+        port: 80
+        permanent: yes
+        state: enabled
+
+    # Bug 8: What's wrong with this loop?
+    - name: Create log directories
+      file:
+        path: "{{ item }}"
+        state: dir
+        owner: www-data
+      with_items:
+        - /var/log/myapp
+        - /var/log/myapp/access
+        - /var/log/myapp/error
+
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
