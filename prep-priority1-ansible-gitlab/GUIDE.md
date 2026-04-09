@@ -1,6 +1,6 @@
 # Priority 1: Ansible + GitLab Debugging — Study Guide
 
-> **For:** Taylor's Monday hands-on (12:00-12:45 — FIRST round, you walk in cold)
+> **For:** Andy's Monday hands-on (12:45-1:30 — SECOND round, after Taylor's system design)
 > **Scenario:** Given a buggy Ansible-based GitLab CI/CD project that deploys to a target host. **AIR-GAPPED environment** — no internet. Local GitLab, local Nexus, local DNS. Find and fix: GitLab config issues, Ansible config/code issues, pipeline problems, AND air-gap specific failures.
 > 
 > **The #1 bug category in air-gap: things that assume internet access.** Every public registry pull, every pip install, every Galaxy download, every external URL — all broken. Train your eyes to spot these FIRST.
@@ -47,7 +47,7 @@
 | 30 min | Skim `02` + `04` | Bug patterns + debugging patterns — quick scan. |
 | | **REST** | Trust the prep. |
 
-## What Taylor Will Test
+## What Andy Will Test
 
 Based on the recruiter's description:
 1. **Read broken configs** — .gitlab-ci.yml, ansible.cfg, playbook.yml, inventory

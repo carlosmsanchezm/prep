@@ -1,7 +1,7 @@
 # Priority 2: Linux / Networking / Podman / Containers Depth — Study Guide
 
-> **For:** Andy's Monday deep-dive (12:45-1:30 — SECOND round, after Taylor)
-> **Format:** Conversational probing — Linux, networking, Podman, containers, GitLab, builds. "Go deeper" on each topic. 3-4 levels.
+> **Status:** Thursday's deep dive with Taylor already happened — you nailed it (df, du, ss, systemd, journalctl, Git, Ansible, GitLab, reverse proxy, STIG hardening). This directory is now supplementary review, not primary prep.
+> **For Monday:** Taylor = System Design (12:00). Andy = Hands-on Debugging (12:45). See `prep-priority1-ansible-gitlab/` for Andy's prep and `architecture/system-design-airgap-dev-env.md` for Taylor's prep.
 
 ## Everything you need is in THIS directory. Read in order.
 

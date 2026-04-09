@@ -106,6 +106,135 @@ build:
     - linux
 ```
 
+### YAML Anchors (DRY — Don't Repeat Yourself)
+
+YAML anchors are a **YAML feature** (not GitLab-specific) that let you define a reusable block once and reference it in multiple places. GitLab CI uses them heavily to reduce duplication.
+
+```yaml
+# DEFINE an anchor with & — this is the template
+.deploy_template: &deploy_defaults
+  image: registry.local/rhel9:latest
+  tags:
+    - ansible
+  before_script:
+    - eval $(ssh-agent -s)
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+
+# USE the anchor with << and * — merges all keys from the template
+deploy_staging:
+  <<: *deploy_defaults
+  stage: deploy
+  script:
+    - ansible-playbook -i inventory/staging.yml deploy.yml
+  environment: staging
+
+deploy_production:
+  <<: *deploy_defaults
+  stage: deploy
+  script:
+    - ansible-playbook -i inventory/production.yml deploy.yml
+  environment: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+```
+
+**How it works:**
+- `&deploy_defaults` — **defines** the anchor (like a variable assignment)
+- `*deploy_defaults` — **references** the anchor (inserts the content)
+- `<<:` — **merge key** — merges the anchor's keys into the current mapping
+- Any key you define in the job **overrides** the same key from the anchor (script, environment, rules)
+
+**Hidden job trick:** Prefix with `.` (like `.deploy_template`) to make it a "hidden job" — GitLab won't run it as a pipeline job, it's purely a template.
+
+```yaml
+# You can also anchor just a list (not a full job)
+.common_scripts: &setup_steps
+  - echo "Setting up..."
+  - source /etc/profile
+
+build:
+  script:
+    - *setup_steps              # inserts the list here
+    - make build
+
+# Or anchor a variables block
+.common_vars: &shared_vars
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  ANSIBLE_FORCE_COLOR: "true"
+
+deploy:
+  variables:
+    <<: *shared_vars
+    DEPLOY_ENV: "production"    # add job-specific vars alongside shared ones
+```
+
+**Why it matters for air-gap:** When every job needs the same local registry image, SSH setup, and runner tags, anchors prevent you from repeating (and potentially mistyping) those lines in every job.
+
+### GitLab Monitoring with Prometheus + Grafana
+
+GitLab exposes metrics natively at `/-/metrics` (Prometheus format). Prometheus scrapes these, Grafana visualizes them.
+
+**What GitLab exposes:**
+```
+# GitLab built-in metrics endpoint
+https://gitlab.dev.internal/-/metrics
+
+# Key metrics:
+gitlab_ci_pipeline_duration_seconds    — how long pipelines take
+gitlab_ci_jobs_total                   — job count by status (success, failed, canceled)
+gitlab_runner_jobs_total               — jobs per runner
+gitlab_workhorse_http_requests_total   — HTTP request rates to GitLab
+gitaly_disk_usage_bytes                — Git storage disk usage
+```
+
+**Runner metrics (separate endpoint):**
+```
+# GitLab Runner also exposes its own metrics:
+http://runner-host:9252/metrics
+
+# Key runner metrics:
+gitlab_runner_jobs                       — current running/pending jobs
+gitlab_runner_request_concurrency        — concurrent job requests
+gitlab_runner_errors_total               — runner errors by type
+process_cpu_seconds_total                — runner CPU usage
+process_resident_memory_bytes            — runner memory usage
+```
+
+**Prometheus scrape config (prometheus.yml):**
+```yaml
+scrape_configs:
+  - job_name: 'gitlab'
+    metrics_path: '/-/metrics'
+    static_configs:
+      - targets: ['gitlab.dev.internal:443']
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true    # for self-signed certs in air-gap
+
+  - job_name: 'gitlab-runner'
+    static_configs:
+      - targets: ['runner.dev.internal:9252']
+```
+
+**Grafana dashboards for GitLab — what to watch:**
+
+| Dashboard panel | PromQL query | Why it matters |
+|----------------|-------------|----------------|
+| Pipeline duration trend | `gitlab_ci_pipeline_duration_seconds` | Spot slow pipelines — are builds getting slower over time? |
+| Job failure rate | `rate(gitlab_ci_jobs_total{status="failed"}[1h])` | Track reliability — are failures increasing? |
+| Runner utilization | `gitlab_runner_jobs{state="running"}` | Are runners overloaded? Need more? |
+| Runner queue depth | `gitlab_runner_jobs{state="pending"}` | Jobs waiting = not enough runners |
+| Gitaly disk usage | `gitaly_disk_usage_bytes` | Running out of Git storage? |
+| Runner errors | `rate(gitlab_runner_errors_total[1h])` | Are runners failing to connect, pull images, etc? |
+
+**How to use dashboards to tune GitLab (what Taylor asked):**
+- **Pipeline too slow?** → Check which stage takes longest. Cache dependencies. Use parallel jobs.
+- **Runners overloaded?** → Increase `concurrent` in runner config.toml. Add more runner instances.
+- **Disk filling up?** → Set artifact `expire_in`, clean old pipelines, prune container registry.
+- **Jobs stuck in pending?** → Runner queue depth high = add runners or fix tag mismatch.
+
 ### Common Variables
 ```
 $CI_COMMIT_SHA          — full commit hash

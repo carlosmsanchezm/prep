@@ -1,4 +1,4 @@
-# Drill 04: Taylor's Exact Scenario — Find ALL the Bugs
+# Drill 04: Andy's Hands-On Scenario — Find ALL the Bugs
 
 > **Scenario:** You're given a GitLab CI/CD project that uses Ansible to deploy a web server to a target host. The runner uses Podman executor. The environment is AIR-GAPPED — no internet access. Local GitLab, local Nexus registry, local DNS. Everything is broken — syntax bugs, config bugs, AND air-gap bugs. Find and fix every bug.
 > 

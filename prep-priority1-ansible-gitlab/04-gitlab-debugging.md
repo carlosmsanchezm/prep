@@ -1,6 +1,6 @@
 # GitLab CI/CD Debugging — Common Problems & How to Fix Them
 
-> Taylor's scenario involves a buggy GitLab CI/CD setup deploying via Ansible in an AIR-GAPPED environment. These are the problems you'll encounter — both general bugs AND air-gap specific failures.
+> Andy's scenario involves a buggy GitLab CI/CD setup deploying via Ansible in an AIR-GAPPED environment. These are the problems you'll encounter — both general bugs AND air-gap specific failures.
 
 ---
 
@@ -349,7 +349,7 @@ lint:
 
 ## Debugging Flow for Taylor's Scenario
 
-When Taylor shows you the buggy project, follow this order:
+When Andy shows you the buggy project, follow this order:
 
 ```
 1. READ .gitlab-ci.yml FIRST

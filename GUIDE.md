@@ -1,11 +1,12 @@
 # Anduril Prep Boot Camp — How to Use This
 
-## The Two Rounds
+## The Three Rounds
 
-| Round | Interviewer | Format | Weight |
+| Round | Interviewer | Format | Status |
 |-------|-------------|--------|--------|
-| **1. Technical Deep Dive** | **Andy Carroll** (hiring manager) | Whiteboard. Walk through your systems, design discussions, tradeoffs, architecture. He'll probe deep. | **THIS IS THE ROUND THAT MATTERS MOST.** Andy is the hiring manager. Impress him. |
-| **2. Technical Hands-On** | **Taylor Hine** | In-person. Live debugging, Ansible, Podman, Linux, networking. Practical problem-solving. | Important but secondary. Taylor validates you can do the work. |
+| **1. Technical Deep Dive (Thu)** | **Taylor Hine** | Remote. Rapid-fire Linux/DevOps questions: df, du, ss, systemd, journalctl, Git, Ansible, GitLab, reverse proxy, STIG hardening. | **DONE — went great.** |
+| **2. System Design (Mon 12:00)** | **Taylor Hine** | Onsite. Collaborative, relevant to air-gap. Design an air-gapped dev environment. | **Prep: `architecture/system-design-airgap-dev-env.md`** |
+| **3. Hands-On Debugging (Mon 12:45)** | **Andy Carroll** (hiring manager) | Onsite. Debugging activity — relevant, not LeetCode. Buggy configs/code to find and fix. | **Prep: `prep-priority1-ansible-gitlab/drill-04`** |
 
 ---
 
@@ -19,14 +20,12 @@
 
 ---
 
-## Daily Structure (5-6 hours)
-
-Architecture gets the majority of time because Andy's whiteboard is the priority.
+## Weekend Plan (Fri-Sun before Monday onsite)
 
 | Block | Time | Focus | For Which Round |
 |-------|------|-------|-----------------|
-| **Morning: Architecture** | **3 hours** | Draw systems, narrate aloud, study components, practice tradeoffs, rehearse bridges to Anduril | **Andy (Round 1)** |
-| **Afternoon: Hands-On** | **2 hours** | Ansible drills, Bash, Linux troubleshooting, networking, Podman, GitLab CI | **Taylor (Round 2)** |
+| **Morning: System Design** | **2 hours** | Draw air-gapped dev env from `architecture/system-design-airgap-dev-env.md`, narrate aloud, practice the 14-question method | **Taylor (Mon 12:00)** |
+| **Afternoon: Debugging** | **1.5 hours** | Do `prep-priority1-ansible-gitlab/drill-04` cold, review bug patterns from `02` + `04` | **Andy (Mon 12:45)** |
 
 ---
 
@@ -185,10 +184,9 @@ When asked "tell me about yourself" or "walk me through your experience," hit th
 
 ## Key Reminders
 
-- **Andy is the priority.** The whiteboard deep dive is where you win or lose. Architecture prep gets 3 hours/day.
-- **Your differentiator is the K8s migration story + air-gap RKE2.** No other candidate has both. Find ways to bring it up.
+- **Taylor's system design comes FIRST (12:00).** Practice drawing the air-gapped dev environment. Narrate aloud. Use the 14-question method.
+- **Andy's hands-on comes SECOND (12:45).** He's the hiring manager. The debugging exercise is relevant — not meant to trick. Talk through your process.
+- **Your differentiator is the K8s migration story + air-gap RKE2.** No other candidate has both. The system design is your chance to show this.
 - **Draw while you talk.** Whiteboard is not optional — practice drawing every day.
-- **Know components 3-4 levels deep.** Andy will probe. "I used RKE2" is level 1. "registries.yaml redirects containerd to local Nexus, Canal CNI uses Flannel VXLAN for overlay, agent joins on port 9345" is level 3.
+- **You already proved depth on Thursday.** Taylor liked what he saw. Now show you can design AND debug.
 - **Bridge everything to Anduril.** Every story should end with "...and that's exactly what you need here."
-- **Taylor validates hands-on.** Ansible, Podman, Linux, networking. Study the cheatsheets, do the drills, but don't sacrifice architecture time for it.
-- **You already passed the HM screen.** Andy liked you enough to bring you onsite. Now show him you can deliver.
