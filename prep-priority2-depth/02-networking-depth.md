@@ -181,6 +181,97 @@ kubectl logs -n kube-system -l k8s-app=kube-dns
 10. Response follows reverse path
 ```
 
+## Reverse Proxy — What It Is and Why It Matters
+
+> Taylor asked: "Could you describe what a reverse proxy is and what are some of the benefits?"
+
+### What It Is
+
+A reverse proxy sits **in front of backend servers** and handles all incoming client requests. The client talks to the proxy, the proxy talks to the backend. The client never talks directly to the backend.
+
+```
+WITHOUT reverse proxy:
+  Client → Backend Server (exposed directly)
+
+WITH reverse proxy:
+  Client → Reverse Proxy → Backend Server(s) (hidden)
+```
+
+### Forward Proxy vs Reverse Proxy
+
+```
+FORWARD PROXY (protects clients):
+  Client → Forward Proxy → Internet
+  "Client hides behind the proxy"
+  Example: corporate proxy, Squid — employees browse through it
+
+REVERSE PROXY (protects servers):
+  Internet → Reverse Proxy → Backend Servers
+  "Servers hide behind the proxy"
+  Example: Nginx, HAProxy, Envoy, Istio ingress gateway
+```
+
+### Benefits
+
+| Benefit | How it works |
+|---------|-------------|
+| **Load balancing** | Distributes traffic across multiple backend servers (round-robin, least connections, IP hash) |
+| **Security** | Hides internal server IPs and architecture from clients. Attacker sees the proxy, not your backends. |
+| **TLS termination** | Proxy handles HTTPS (decrypt/encrypt). Backends can run plain HTTP internally — simpler cert management. |
+| **Caching** | Proxy caches static content (images, CSS, JS). Backends handle fewer requests → better performance. |
+| **Compression** | Proxy compresses responses (gzip/brotli) before sending to client → less bandwidth. |
+| **Rate limiting** | Proxy can limit requests per IP — protects backends from abuse or DDoS. |
+| **Centralized logging** | All traffic flows through one point — single place for access logs, metrics, auditing. |
+
+### Real Examples
+
+```bash
+# Nginx as reverse proxy
+# /etc/nginx/conf.d/myapp.conf
+server {
+    listen 443 ssl;
+    server_name myapp.dev.internal;
+
+    ssl_certificate /etc/nginx/certs/myapp.crt;
+    ssl_certificate_key /etc/nginx/certs/myapp.key;
+
+    location / {
+        proxy_pass http://localhost:8080;    # forward to backend
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+# HAProxy as load-balancing reverse proxy
+# /etc/haproxy/haproxy.cfg
+frontend web
+    bind *:443 ssl crt /etc/haproxy/certs/myapp.pem
+    default_backend app_servers
+
+backend app_servers
+    balance roundrobin
+    server app1 10.0.1.10:8080 check
+    server app2 10.0.1.11:8080 check
+    server app3 10.0.1.12:8080 check
+```
+
+### In Kubernetes Context
+
+```
+Istio Ingress Gateway = reverse proxy for the cluster
+  Client → Ingress Gateway (Envoy) → Service → Pod
+
+K8s Ingress resource = reverse proxy config
+  - Routes by hostname and path
+  - TLS termination
+  - Load balancing across pods
+```
+
+**How to explain:** "A reverse proxy sits in front of your backend servers and handles client requests. Benefits: load balancing across multiple servers, security by hiding internal architecture, TLS termination so backends don't manage certs, caching for performance, and centralized logging. In K8s, the Istio ingress gateway is essentially a reverse proxy for the cluster."
+
+---
+
 ## Common Network Problems and Diagnosis
 
 | Symptom | Likely Cause | Check With |
