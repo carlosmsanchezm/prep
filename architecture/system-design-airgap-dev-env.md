@@ -263,6 +263,217 @@ flowchart TD
 | Keycloak over LDAP-only | Full OIDC/SSO, MFA, badge/CAC integration, web admin | LDAP: auth only, no SSO across tools |
 | ArgoCD for service deployment over Terraform | Terraform for INFRA (VPC, EKS, IAM). ArgoCD for SERVICES (GitLab, Nexus, Vault — all Helm charts). Same IaC/GitOps split as VivSoft. | Deploying K8s services via Terraform is possible but wrong tool — no drift detection, no continuous reconciliation |
 
+---
+
+## Deep Understanding — Components Taylor Will Probe
+
+### PKI: cert-manager + step-ca — What Each Does and Why
+
+Think of it as two roles:
+
+**step-ca = the CA (Certificate Authority)** — the thing that CREATES certificates
+- It's like a stamp factory. It holds the root key and signs certificates.
+- In the real world, Let's Encrypt is a public CA. But we're air-gapped — can't reach Let's Encrypt.
+- So we run our OWN CA inside the cluster: step-ca.
+- It says: "I am the authority. I vouch that gitlab.dev.internal is real."
+
+**cert-manager = the automation** — the thing that REQUESTS and RENEWS certificates
+- It watches Kubernetes for "I need a cert for this hostname" requests (Certificate CRDs)
+- It talks to step-ca: "Hey, give me a TLS cert for gitlab.dev.internal"
+- step-ca signs it, cert-manager stores it as a Kubernetes Secret
+- When the cert is about to expire, cert-manager automatically renews it
+
+**How they connect to everything:**
+```
+cert-manager requests cert → step-ca signs it → cert stored as K8s Secret
+                                                        ↓
+                                              Istio ingress gateway uses it (HTTPS for all services)
+                                              Keycloak uses it (HTTPS for login)
+                                              GitLab uses it (HTTPS for git clone)
+```
+
+**Why it matters:** Without PKI, either everything is HTTP (insecure) or someone manually creates and rotates certs (breaks at 2am when they expire). cert-manager + step-ca = automated, internal HTTPS everywhere, no internet needed.
+
+**How to say it:** "We can't use Let's Encrypt — we're air-gapped. So we run our own CA with step-ca inside the cluster. cert-manager automates certificate requests and renewal. When Istio's ingress gateway needs a TLS cert for gitlab.dev.internal, cert-manager asks step-ca to sign it, stores it as a K8s Secret, and renews it before it expires. Automated internal PKI — no manual cert management."
+
+---
+
+### GitLab Runner + CI/CD + Ansible — How the Pipeline Works
+
+**The flow:**
+```
+Developer pushes code to GitLab
+    → GitLab reads .gitlab-ci.yml
+    → GitLab tells the Runner: "run this pipeline"
+    → Runner spins up a container (Podman) for each job
+    → Inside that container, the job's script runs
+```
+
+**Where Ansible fits in:** One of the pipeline JOBS runs `ansible-playbook`. The runner container has Ansible installed. From inside that container, Ansible SSHes out to a test VM and configures it.
+
+```
+Runner container (inside K8s cluster)
+    → runs: ansible-playbook -i inventory deploy.yml
+    → SSH connection → Test VM (outside the cluster, bare-metal or VM)
+    → Ansible configures the Test VM (installs packages, deploys configs, starts services)
+```
+
+**"Should the service already be running on the test VM?"**
+No — that's the whole point. The test VM is a clean/disposable machine. The Ansible playbook is supposed to SET IT UP from scratch. If the playbook succeeds → it works, pipeline passes. If it fails → dev fixes the playbook.
+
+**"What if it's a container? Why would we need Ansible?"**
+Two different deployment targets:
+
+| Target | How to deploy | Why |
+|--------|--------------|-----|
+| **Container/pod** (runs in K8s) | Helm chart + ArgoCD | If the app runs as a container in K8s, you write a Helm chart. ArgoCD deploys it. No Ansible needed. |
+| **Bare-metal/VM** (runs outside K8s) | Ansible playbook | If the app runs on a traditional server (not K8s), you need Ansible to SSH in and configure it. |
+
+Anduril uses BOTH — their services run on bare-metal with Podman and Compose (not K8s yet). So they need Ansible to configure those servers. The pipeline validates the Ansible playbook against a test VM before it runs in production.
+
+**How to say it:** "If the workload is a container, you deploy it with Helm and ArgoCD — no Ansible needed. But if the workload runs on a traditional server — like Anduril's current setup with Podman on bare-metal — you need Ansible to SSH in and configure it. The pipeline runs the Ansible playbook against a disposable test VM to validate it works before running against production."
+
+---
+
+### Vault — What It Connects To and Why
+
+Vault is the central secrets store. It connects to things that NEED secrets:
+
+```
+Vault
+ ├── → Runner: pipeline credentials (registry passwords, deploy tokens, API keys)
+ ├── → Test VMs: SSH certificates (Ansible gets short-lived certs to connect)
+ ├── → PostgreSQL: database passwords (GitLab, Keycloak, SonarQube DB credentials)
+ ├── → Keycloak: OIDC client secrets
+ └── → Any app that needs secrets: reads from Vault instead of hardcoding
+```
+
+**Why Vault over just putting secrets in GitLab CI variables or files:**
+- **Audit trail** — Vault logs who accessed what secret and when
+- **Auto-rotation** — Vault can rotate database passwords automatically
+- **SSH cert signing** — instead of copying a static SSH key everywhere, Vault issues short-lived certificates per pipeline run. Key is valid for 5 minutes, expires, never stored on disk.
+- **RBAC** — team A can access their secrets, team B can't see them
+
+**How to say it:** "Vault is the central secrets store. The runner pulls pipeline credentials from it — deploy keys, registry passwords. Ansible gets short-lived SSH certs from Vault's SSH secret engine — valid for one pipeline run, then they expire. Database passwords for PostgreSQL live in Vault, not in config files. Everything is audited — who accessed what, when."
+
+---
+
+### NFS / Persistent Storage on Bare-Metal
+
+**NFS = Network File System.** A shared folder over the network. One server has a big disk, other machines mount it like a local folder.
+
+**EFS = Elastic File System.** AWS's managed version of NFS. Same concept — shared storage over network — but AWS runs it. We can't use EFS because we're on-prem, not in AWS.
+
+**How it connects to K8s on bare-metal — the full chain:**
+
+```
+Physical Layer:
+  NFS Server (one machine with big disks, e.g. 10TB)
+    → exports /data/gitaly, /data/builds, /data/artifacts over the network
+
+K8s Layer:
+  PV (PersistentVolume) = "Here's a piece of storage K8s knows about"
+    → type: NFS
+    → server: 10.0.1.100
+    → path: /data/gitaly
+
+  PVC (PersistentVolumeClaim) = "A pod's request for storage"
+    → "I need 50Gi of storage"
+    → K8s matches it to a PV
+
+  Pod (Gitaly) = "Uses the PVC as a mounted directory"
+    → volumeMount: /var/opt/gitlab/git-data
+    → This actually reads/writes to the NFS server over the network
+```
+
+**What actually happens when Gitaly writes a file:**
+```
+Gitaly pod writes a Git repo file
+  → writes to /var/opt/gitlab/git-data (inside the container)
+  → that path is a PVC mount
+  → PVC is bound to a PV
+  → PV points to NFS server at 10.0.1.100:/data/gitaly
+  → file actually lands on the NFS server's physical disk
+  → if the pod restarts or moves to another node, PVC reconnects to same NFS path
+  → data survives
+```
+
+**Why this matters on bare-metal vs cloud:**
+- In AWS: use EBS (block storage per node) or EFS (shared NFS). AWS manages the disks.
+- On bare-metal: YOU manage the NFS server. Physical machine with disks. Configure exports, mount points, backups.
+- K8s doesn't care which one — PV/PVC is the abstraction layer. The pod doesn't know if storage is NFS, EBS, or local disk.
+
+**How to say it:** "On bare-metal, we run an NFS server — one machine with large disks that exports shared directories over the network. In K8s, we create PersistentVolumes that point to those NFS paths. Pods claim storage through PVCs — Gitaly gets /data/gitaly for Git repos, the runner gets /data/builds for build caches. If the pod restarts or moves to another node, it reconnects to the same NFS path — data persists. Same concept as EFS in AWS, but self-hosted."
+
+---
+
+### ArgoCD — How to Explain It Well
+
+**The problem ArgoCD solves:**
+Without ArgoCD, to deploy GitLab you'd run `helm install gitlab charts/gitlab/`. To update, `helm upgrade`. To deploy 15 services, you run 15 commands. If someone manually changes something in the cluster, you don't know. Things drift.
+
+**What ArgoCD does:**
+1. You put a Git repo on local GitLab with two directories:
+   - `apps/` — one Application YAML per service (says WHAT to deploy)
+   - `charts/` — one Helm chart per service (says HOW to deploy)
+
+2. ArgoCD watches this repo (polls every 3 minutes — no webhooks in air-gap)
+
+3. For each Application YAML, ArgoCD:
+   - Reads the Helm chart
+   - Renders it into K8s manifests
+   - Compares rendered manifests vs what's actually in the cluster
+   - If they differ → syncs (applies the changes)
+
+**Example — deploying GitLab:**
+```yaml
+# apps/gitlab.yaml (the Application CRD)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitlab
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://gitlab.dev.internal/devops/argoflow.git
+    path: charts/gitlab          # where the Helm chart lives
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitlab
+  syncPolicy:
+    automated:
+      prune: true      # delete resources removed from Git
+      selfHeal: true   # revert manual changes to match Git
+```
+
+**App-of-apps pattern:**
+Instead of ArgoCD watching 15 Application YAMLs individually, you create ONE parent Application that points to the `apps/` directory. ArgoCD discovers all the children automatically.
+
+```
+Parent Application → watches apps/ directory
+  → finds gitlab.yaml → deploys GitLab
+  → finds nexus.yaml → deploys Nexus
+  → finds vault.yaml → deploys Vault
+  → ... all 15 services
+```
+
+**Adding a new service:**
+1. Write the Helm chart in `charts/new-service/`
+2. Write the Application YAML in `apps/new-service.yaml`
+3. `git push`
+4. ArgoCD picks it up in 3 minutes, deploys it automatically
+
+**Key features to mention:**
+- **Drift detection** — someone manually scales a deployment? ArgoCD reverts it to match Git (selfHeal)
+- **Prune** — remove a service from Git? ArgoCD deletes it from the cluster
+- **Rollback** — bad deploy? `git revert` → ArgoCD syncs back to the old version
+- **Reproducible** — need a second environment? Point ArgoCD at same repo with different values. Same exact stack.
+
+**How to say it:** "ArgoCD is the GitOps engine. It watches a Git repo on local GitLab — polls every 3 minutes since we can't use webhooks air-gapped. The repo has two directories: apps/ with one Application YAML per service that says 'deploy this Helm chart to this namespace,' and charts/ with the actual Helm charts. I use the app-of-apps pattern — one parent Application points to apps/, ArgoCD discovers all children automatically. If someone manually changes something in the cluster, selfHeal reverts it. If I remove a service from Git, prune deletes it. The whole environment is defined in Git — reproducible, auditable, rollbackable."
+
+---
+
 ### What Makes This Answer Strong
 1. **Addresses "first day"** — badge in, laptop, immediate productivity path
 2. **Every tool justified** — not just "we need GitLab" but WHY GitLab over alternatives
