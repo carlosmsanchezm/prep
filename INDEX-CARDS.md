@@ -1,4 +1,4 @@
-# Index Cards for Monday Hands-On
+# Index Cards — Interview Reference
 
 Print or copy these onto index cards. One topic per card.
 
@@ -241,4 +241,256 @@ CACHE vs ARTIFACTS:
 
   COMMON BUG: using cache for build output
               (next stage might not get it)
+```
+
+---
+
+## CARD 8 — SRE Troubleshooting: Symptom → First Command
+
+```
+SYMPTOM                          FIRST COMMANDS
+─────────────────────────────────────────────────────
+High CPU                         top -o %CPU
+                                 ps aux --sort=-%cpu | head
+
+High memory / OOM killed         free -h
+                                 dmesg | grep -i oom
+                                 ps aux --sort=-%mem | head
+
+Disk full                        df -h
+                                 du -sh /var/log/*
+                                 find / -type f -size +100M
+                                 journalctl --disk-usage
+
+Service won't start              systemctl status <svc>
+                                 journalctl -u <svc> -n 50
+                                 systemctl cat <svc>
+                                 <svc> -t  or --check-config
+
+Can't connect to service         curl -v http://host:port
+                                 ss -tlnp (on target host)
+                                 ping <host>
+
+DNS not resolving                dig <hostname>
+                                 cat /etc/resolv.conf
+                                 nslookup <hostname>
+
+Permission denied                ls -la /path/to/file
+                                 getenforce
+                                 ausearch -m avc --ts recent
+                                 id <username>
+
+TLS / certificate error          openssl s_client -connect host:443
+                                 openssl x509 -in cert.pem -noout -dates
+                                 curl -vk https://host
+
+Container not running            podman ps -a
+                                 podman logs <container>
+                                 podman inspect <container>
+
+Firewall blocking                firewall-cmd --list-all
+                                 iptables -L -n
+                                 ss -tlnp (is port listening?)
+
+Slow network / routing           traceroute <host>
+                                 ip route
+                                 ip addr
+                                 mtr <host>
+```
+
+---
+
+## CARD 9 — SRE Troubleshooting: Full Investigation Flow
+
+```
+FOR ANY ISSUE:
+1. OBSERVE     → what is the symptom?
+               uptime (load), top (CPU/mem), df -h (disk)
+               systemctl status <svc>, ss -tlnp (ports)
+
+2. ISOLATE     → which process/service/component?
+               ps aux --sort=-%cpu or -%mem
+               journalctl -u <svc> -n 50
+               docker/podman logs <container>
+
+3. INSPECT     → what is causing it?
+               cat the script, config, or unit file
+               check cron (crontab -l, /etc/cron.d/*)
+               check systemd timers (systemctl list-timers)
+               grep -R <name> /etc (find all references)
+
+4. ROOT CAUSE  → WHY is it happening?
+               log file too large? (ls -lh /var/log/*)
+               infinite loop in script?
+               cron running too frequently?
+               config pointing to wrong host/port?
+               disk full causing writes to fail?
+               DNS not resolving?
+               cert expired?
+               firewall blocking?
+
+5. MITIGATE    → immediate fix
+               truncate log, kill process, adjust cron
+               restart service, open port, fix config
+               rotate logs, clear disk, fix permissions
+
+6. PREVENT     → long-term fix
+               log rotation (logrotate)
+               monitoring alerts (Prometheus)
+               config management (Ansible)
+               runbooks for operators
+               design docs for architectural changes
+
+7. DOCUMENT    → postmortem
+               what happened, timeline, root cause
+               what was done, what will prevent recurrence
+```
+
+---
+
+## CARD 10 — Networking Troubleshooting Deep Dive
+
+```
+"CAN'T CONNECT" DEBUGGING ORDER:
+1. Is DNS working?
+   dig <hostname>
+   → if NXDOMAIN: DNS record missing
+   → if timeout: DNS server unreachable
+   → check: cat /etc/resolv.conf
+
+2. Can I reach the host?
+   ping <ip-address>
+   → if timeout: network/routing/firewall
+   → if success: host is reachable
+
+3. Is the port open?
+   ss -tlnp | grep <port>  (run ON target host)
+   → if nothing: service not listening
+   → if listening: something else blocking
+
+4. Is firewall blocking?
+   firewall-cmd --list-all  (on target)
+   iptables -L -n           (on target)
+   → look for DROP/REJECT rules on the port
+
+5. Is the service responding?
+   curl -v http://host:port
+   → connection refused = port not listening
+   → timeout = firewall or routing
+   → 5xx = service error (check service logs)
+   → TLS error = cert problem
+
+6. Where does the path break?
+   traceroute <host>
+   → see which hop stops responding
+
+COMMON FIXES:
+  firewall-cmd --add-port=80/tcp --permanent && firewall-cmd --reload
+  systemctl restart <service>
+  echo "nameserver 10.0.0.2" > /etc/resolv.conf
+```
+
+---
+
+## CARD 11 — Ansible Playbook from Memory (Fleet Management)
+
+```
+BASIC ROLE STRUCTURE:
+  roles/
+    auditd/
+      tasks/main.yml
+      templates/audit.rules.j2
+      handlers/main.yml
+      defaults/main.yml
+
+PLAYBOOK:
+---
+- name: Deploy auditd across fleet
+  hosts: all
+  become: true
+  serial: "10%"              # phased rollout
+
+  tasks:
+    - name: Install auditd
+      package:
+        name: audit
+        state: present
+
+    - name: Deploy audit rules
+      template:
+        src: audit.rules.j2
+        dest: /etc/audit/rules.d/custom.rules
+        mode: '0640'
+      notify: restart auditd
+
+    - name: Ensure auditd running
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart auditd
+      service:
+        name: auditd
+        state: restarted
+
+ROLLOUT STRATEGY:
+  serial: "10%"   → 10% of fleet at a time
+  max_fail_percentage: 5   → stop if >5% fail
+  any_errors_fatal: true   → stop on first error
+
+ROLLBACK PATTERN:
+  - use a variable: rollback_mode: false
+  - when rollback_mode: stop service, remove config, uninstall
+  - Ansible Tower/AWX: schedule runs for continuous compliance
+```
+
+---
+
+## CARD 12 — Go Coding Patterns (Memorize These)
+
+```
+MULTIPLES OF 2:
+func multiples(n int) []int {
+    result := []int{}
+    for i := 0; i < n; i++ {
+        result = append(result, i*2)
+    }
+    return result
+}
+
+FIBONACCI:
+func fib(n int) []int {
+    if n <= 0 { return []int{} }
+    if n == 1 { return []int{0} }
+    result := []int{0, 1}
+    for i := 2; i < n; i++ {
+        next := result[i-1] + result[i-2]
+        result = append(result, next)
+    }
+    return result
+}
+
+CACHING WITH MAP:
+var cache = map[int][]int{}
+
+func cachedFib(n int) []int {
+    if val, ok := cache[n]; ok {
+        return val
+    }
+    result := fib(n)
+    cache[n] = result
+    return result
+}
+
+GO BASICS TO REMEMBER:
+  := short variable declaration
+  []int{} empty int slice
+  append(slice, value) add to slice
+  map[KeyType]ValueType{} create map
+  val, ok := map[key] check if key exists
+  for i := 0; i < n; i++ {} standard loop
+  fmt.Println() print output
+  func name(param type) returnType {}
 ```
